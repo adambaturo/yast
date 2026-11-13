@@ -10,18 +10,73 @@ not a directory mirror or a metadata/permissions backup.
 
 ## Installation
 
-Install [stable Rust](https://rustup.rs/) and the platform's native build tools
-(on Windows, Visual Studio C++ Build Tools and a Windows SDK), then:
+Download your platform's archive and `SHA256SUMS.txt` from
+[GitHub Releases](https://github.com/adambaturo/yast/releases). Archives contain
+the binary, README, license, and changelog.
+
+| Platform | Targets |
+| --- | --- |
+| Linux (static musl) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` |
+| Windows | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` |
+
+Verify the downloaded archive before extracting. On Linux, with both files in
+the current directory (substitute your version and target):
+
+```sh
+archive=yast-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+grep "  $archive\$" SHA256SUMS.txt | sha256sum --check --strict -
+```
+
+On macOS:
+
+```sh
+archive=yast-v0.1.0-aarch64-apple-darwin.tar.gz
+grep "  $archive\$" SHA256SUMS.txt | shasum -a 256 --check -
+```
+
+On Windows PowerShell:
+
+```powershell
+$archive = 'yast-v0.1.0-x86_64-pc-windows-msvc.zip'
+$entries = @(Get-Content SHA256SUMS.txt | Where-Object { ($_ -split '\s+', 2)[1] -eq $archive })
+if ($entries.Count -ne 1) { throw 'Missing or duplicate checksum' }
+$expected = ($entries[0] -split '\s+', 2)[0]
+if ((Get-FileHash $archive -Algorithm SHA256).Hash -ine $expected) { throw 'Checksum mismatch' }
+Expand-Archive $archive -DestinationPath yast
+```
+
+Also verify build provenance with a recent [GitHub CLI](https://cli.github.com/):
 
 ```console
-git clone https://github.com/adambaturo/yast.git
-cd yast
-cargo install --path .
+gh attestation verify <downloaded-archive> --repo adambaturo/yast --signer-workflow adambaturo/yast/.github/workflows/release-binaries.yml
+```
+
+On Unix, extract with `tar -xzf <downloaded-archive>` and place `yast` on your
+`PATH`; on Windows, add the extracted directory to `PATH`. Checksums detect
+corruption; provenance additionally verifies the producing repository/workflow.
+
+To install from source, install [stable Rust](https://rustup.rs/) and the
+platform's native build tools (on Windows, Visual Studio C++ Build Tools and a
+Windows SDK), then:
+
+```console
+cargo install --git https://github.com/adambaturo/yast --locked
 yast --help
 ```
 
-Or build without installing with `cargo build --release`, then run
+From a checkout, build without installing with `cargo build --release --locked`, then run
 `target/release/yast` (`target\release\yast.exe` on Windows).
+
+## Versioning and releases
+
+`Cargo.toml` is the version source of truth; releases use SemVer tags `vX.Y.Z`.
+Until stable, breaking changes bump the `0.x` minor version and features/fixes
+bump the patch. Squash-merged PR titles follow Conventional Commits.
+release-plz prepares version/changelog PRs and publishes GitHub Releases (not
+crates.io); CI then attaches six platform archives, checksums, and provenance.
+See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[RELEASING.md](RELEASING.md).
 
 ## Quick start
 
