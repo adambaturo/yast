@@ -82,20 +82,19 @@ pub fn scan(root: &Path, options: &Common, threads: usize) -> Result<Vec<FileEnt
 }
 
 fn hidden(path: &Path) -> bool {
-    if path
+    let dot_hidden = path
         .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-    {
-        return true;
-    }
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'));
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if let Ok(metadata) = path.symlink_metadata() {
-            return metadata.file_attributes() & 2 != 0;
-        }
+        dot_hidden
+            || path
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_attributes() & 2 != 0)
     }
-    false
+    #[cfg(not(windows))]
+    dot_hidden
 }
 
 pub fn ensure_unchanged(entry: &FileEntry) -> Result<()> {
