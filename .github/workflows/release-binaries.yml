@@ -1,0 +1,140 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Validate release tag
+        id: tag
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable release tag vX.Y.Z"
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check manifest matches tag
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "yast") | .version')"
+          test "$TAG" = "v$version"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        if: runner.os == 'Linux'
+        with:
+          version: 0.13.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-zigbuild@0.20.1
+      - name: Build static Linux binary
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --release --locked --target "$TARGET"
+      - name: Build native or Windows cross binary
+        if: runner.os != 'Linux'
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Stage archive
+        run: |
+          mkdir -p package dist
+          cp README.md LICENSE CHANGELOG.md package/
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/$TARGET/release/yast.exe" package/
+          else
+            cp "target/$TARGET/release/yast" package/
+          fi
+      - name: Archive Unix binary
+        if: runner.os != 'Windows'
+        run: tar -czf "dist/yast-$TAG-$TARGET.tar.gz" -C package yast README.md LICENSE CHANGELOG.md
+      - name: Archive Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path package\* -DestinationPath "dist\yast-$env:TAG-$env:TARGET.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 6
+          sha256sum yast-*.tar.gz yast-*.zip | LC_ALL=C sort -k2 > SHA256SUMS.txt
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/*
+      - name: Upload release assets
+        run: gh release upload "$TAG" dist/* --clobber
