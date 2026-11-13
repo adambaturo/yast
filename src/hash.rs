@@ -70,10 +70,20 @@ fn hash_reader_sized(
         Hasher::Blake3(h) => h.finalize().to_hex().to_string(),
         Hasher::Xxh3(h) => format!("{:032x}", h.digest128()),
         Hasher::Crc32(h) => format!("{:08x}", h.finalize()),
-        Hasher::Md5(h) => format!("{:x}", h.finalize()),
-        Hasher::Sha1(h) => format!("{:x}", h.finalize()),
-        Hasher::Sha256(h) => format!("{:x}", h.finalize()),
+        Hasher::Md5(h) => to_hex(&h.finalize()),
+        Hasher::Sha1(h) => to_hex(&h.finalize()),
+        Hasher::Sha256(h) => to_hex(&h.finalize()),
     })
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 #[cfg(test)]
