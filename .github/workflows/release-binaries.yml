@@ -46,8 +46,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            zig: true
+          # Built natively: zig's linker rejects rustc's --fix-cortex-a53-843419 flag.
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: aarch64-apple-darwin
@@ -76,16 +78,24 @@ jobs:
           version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "yast") | .version')"
           test "$TAG" = "v$version"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        if: runner.os == 'Linux'
+        if: matrix.zig
         with:
           version: 0.13.0
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        if: runner.os == 'Linux'
+        if: matrix.zig
         with:
           tool: cargo-zigbuild@0.20.1
-      - name: Build static Linux binary
-        if: runner.os == 'Linux'
+      - name: Build static Linux binary with zig
+        if: matrix.zig
         run: cargo zigbuild --release --locked --target "$TARGET"
+      - name: Build static Linux binary natively
+        if: runner.os == 'Linux' && !matrix.zig
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          cargo build --release --locked --target "$TARGET"
       - name: Build native or Windows cross binary
         if: runner.os != 'Linux'
         run: cargo build --release --locked --target "$TARGET"
