@@ -246,6 +246,10 @@ fn copy_then_remove(
     destination: &Path,
 ) -> Result<()> {
     let temporary = stage_copy(file, target, destination)?;
+    #[cfg(unix)]
+    temporary
+        .as_file()
+        .set_permissions(fs::metadata(&file.path)?.permissions())?;
     anyhow::ensure!(
         equal_bytes(&file.path, temporary.path())?,
         "staged move verification failed"
@@ -450,5 +454,29 @@ mod tests {
             destination.metadata().unwrap().modified().unwrap(),
             files[1].modified
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_device_move_preserves_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, files, _, _) = fixture();
+        fs::set_permissions(&files[1].path, fs::Permissions::from_mode(0o751)).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let destination = target.path().join("b");
+        copy_then_remove(
+            root.path(),
+            &files[1],
+            &files[0],
+            target.path(),
+            &destination,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"content");
+        assert!(!files[1].path.exists());
     }
 }

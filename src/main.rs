@@ -58,7 +58,7 @@ fn run(cli: Cli) -> Result<u8> {
         bar
     };
     progress.set_message("Scanning");
-    let result = pool.install(|| -> Result<Report> {
+    let result = pool.install(|| -> Result<(Report, Option<io::BufWriter<fs::File>>)> {
         let (source, target, command) = match &cli.command {
             Command::Compare { source, target } => (source, Some(target), "compare"),
             Command::Dupes { dir, .. } => (dir, None, "dupes"),
@@ -98,6 +98,20 @@ fn run(cli: Cli) -> Result<u8> {
         if command == "dupes" {
             comparison.missing.clear();
         }
+        // Reserve output after scanning so it is not scanned, but before modifying files.
+        let output = cli
+            .common
+            .output
+            .as_ref()
+            .map(|path| {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map(io::BufWriter::new)
+                    .with_context(|| format!("creating report {}", path.display()))
+            })
+            .transpose()?;
         let sync = if let Command::Sync { options, .. } = &cli.command {
             Some(copy::sync(
                 &source_files,
@@ -126,29 +140,26 @@ fn run(cli: Cli) -> Result<u8> {
         } else {
             None
         };
-        Ok(Report {
-            command,
-            comparison,
-            sync,
-            dedupe,
-        })
+        Ok((
+            Report {
+                command,
+                comparison,
+                sync,
+                dedupe,
+            },
+            output,
+        ))
     });
     progress.finish_and_clear();
-    let report = result?;
+    let (report, output) = result?;
     if cli.common.verbose > 0 && !cli.common.quiet {
         eprintln!(
             "{} workers; {} full hashes; {} prefix hashes",
             threads, report.comparison.hashed_files, report.comparison.partial_hashed_files
         );
     }
-    if let Some(path) = &cli.common.output {
-        // Never allow reporting to overwrite an existing file or scanned content.
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .with_context(|| format!("creating report {}", path.display()))?;
-        report::write(&report, cli.common.format, &mut io::BufWriter::new(file))?;
+    if let Some(mut output) = output {
+        report::write(&report, cli.common.format, &mut output)?;
     } else {
         report::write(&report, cli.common.format, &mut io::stdout().lock())?;
     }
@@ -172,12 +183,16 @@ fn run(cli: Cli) -> Result<u8> {
 }
 
 fn resolve(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return path
-            .canonicalize()
-            .with_context(|| format!("resolving {}", path.display()));
-    }
-    let absolute = std::path::absolute(path)?;
+    // Do not lexically remove '..' before resolving earlier symlink components.
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    anyhow::ensure!(
+        absolute.is_absolute(),
+        "destination must resolve to an absolute path"
+    );
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -185,16 +200,23 @@ fn resolve(path: &Path) -> Result<PathBuf> {
                 normalized.pop();
             }
             Component::CurDir => {}
+            Component::Normal(value) => {
+                normalized.push(value);
+                match fs::symlink_metadata(&normalized) {
+                    Ok(_) => {
+                        normalized = normalized
+                            .canonicalize()
+                            .with_context(|| format!("resolving {}", normalized.display()))?;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("resolving {}", normalized.display()))
+                    }
+                }
+            }
             value => normalized.push(value.as_os_str()),
         }
     }
-    let mut ancestor = normalized.as_path();
-    while !ancestor.exists() {
-        ancestor = ancestor
-            .parent()
-            .context("cannot resolve destination ancestor")?;
-    }
-    Ok(ancestor
-        .canonicalize()?
-        .join(normalized.strip_prefix(ancestor)?))
+    Ok(normalized)
 }

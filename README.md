@@ -171,13 +171,14 @@ Deletion defaults to Windows Recycle Bin, macOS Trash, or Linux freedesktop
 trash through the `trash` crate. A trash failure is reported as a failed action;
 there is **no fallback to permanent deletion**.
 
-Move accepts a nonexistent destination and resolves existing ancestors before
+Move accepts a nonexistent destination and resolves existing symlink components
+before applying `..` components and
 checking overlap. `keep` reports existing destination paths as failed actions.
 `flatten` reuses sync naming, adding a deterministic BLAKE3 suffix for existing
 or planned collisions. Destination parents must be plain directories, not links.
 Moves use the platform's atomic no-replace rename on the same filesystem
 (`fs::rename` can overwrite, so it is not used directly). On a cross-device error, a temporary copy is
-assigned the source mtime, compared byte-for-byte, and published without clobbering
+assigned the source mtime and Unix permissions, compared byte-for-byte, and published without clobbering
 before removing the source. A failure after publishing retains the destination
 copy and reports the error; the source is not removed if its safety recheck fails.
 
@@ -198,6 +199,8 @@ bytes of completed permanent deletions only, not actual filesystem free space:
 trash and moves retain content, and hard links/compression can affect disk usage.
 Delete/move return **0** for success or a clean dry run, **2** if any action fails.
 Successful actions are not rolled back when another action fails.
+An `--output` file is reserved after scanning but before actions execute:
+an existing or uncreatable report path fails without modifying duplicates.
 
 ### `yast sync <SOURCE> <TARGET>`
 

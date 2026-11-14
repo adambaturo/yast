@@ -643,6 +643,112 @@ fn all_hash_algorithms_and_invalid_inputs() {
 
 #[cfg(unix)]
 #[test]
+fn dupes_move_resolves_symlinks_before_parent_components() {
+    use std::os::unix::fs::symlink;
+    let parent = TempDir::new().unwrap();
+    let dir = parent.path().join("source");
+    put(&dir, "a", "same");
+    put(&dir, "b", "same");
+    fs::create_dir(dir.join("nested")).unwrap();
+    let link = parent.path().join("link");
+    symlink(dir.join("nested"), &link).unwrap();
+    let destination = link.join("..").join("dupes");
+    yast()
+        .arg("dupes")
+        .arg(&dir)
+        .args(["--action", "move", "--to"])
+        .arg(&destination)
+        .arg("--execute")
+        .assert()
+        .code(2);
+    assert_eq!(fs::read(dir.join("a")).unwrap(), b"same");
+    assert_eq!(fs::read(dir.join("b")).unwrap(), b"same");
+    assert!(!dir.join("dupes").exists());
+    assert!(!parent.path().join("dupes").exists());
+
+    let outside = TempDir::new().unwrap();
+    fs::create_dir(outside.path().join("nested")).unwrap();
+    let outside_link = parent.path().join("outside-link");
+    symlink(outside.path().join("nested"), &outside_link).unwrap();
+    yast()
+        .arg("dupes")
+        .arg(&dir)
+        .args(["--action", "move", "--to"])
+        .arg(outside_link.join("..").join("dupes"))
+        .arg("--execute")
+        .assert()
+        .success();
+    assert_eq!(fs::read(outside.path().join("dupes/b")).unwrap(), b"same");
+    assert!(!parent.path().join("dupes").exists());
+}
+
+#[test]
+fn rejected_report_destinations_leave_duplicates_untouched() {
+    for action in ["delete", "move"] {
+        let dir = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        put(dir.path(), "a", "same");
+        put(dir.path(), "b", "same");
+        put(dir.path(), "report.json", "existing report");
+        for output in [
+            dir.path().join("b"),
+            dir.path().join("report.json"),
+            dir.path().join("missing/report.json"),
+            dir.path().join("a/report.json"),
+            dir.path().to_path_buf(),
+        ] {
+            let mut command = yast();
+            command
+                .arg("dupes")
+                .arg(dir.path())
+                .args(["--action", action, "--execute"]);
+            if action == "delete" {
+                command.arg("--permanent");
+            } else {
+                command.arg("--to").arg(target.path());
+            }
+            command.arg("--output").arg(output).assert().code(2);
+            assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+            assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
+            assert_eq!(
+                fs::read(dir.path().join("report.json")).unwrap(),
+                b"existing report"
+            );
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
+fn report_output_is_reserved_after_scan_and_reused_after_deletion() {
+    let dir = TempDir::new().unwrap();
+    put(dir.path(), "a", "");
+    put(dir.path(), "b", "");
+    let output = dir.path().join("0-report.json");
+    yast()
+        .arg("dupes")
+        .arg(dir.path())
+        .args([
+            "--action",
+            "delete",
+            "--permanent",
+            "--execute",
+            "--format",
+            "json",
+            "--output",
+        ])
+        .arg(&output)
+        .assert()
+        .success();
+    let value: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(value["comparison"]["source_files"], 2);
+    assert_eq!(value["dedupe"]["done"], 1);
+    assert!(dir.path().join("a").exists());
+    assert!(!dir.path().join("b").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn dupes_move_rejects_symlink_parents_and_delete_rejects_symlink_members() {
     use std::os::unix::fs::symlink;
     let dir = TempDir::new().unwrap();
