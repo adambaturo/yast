@@ -4,8 +4,8 @@ A parallel, content-based directory comparison and safe copy CLI, written in Rus
 Paths do not determine equality: a photo renamed or moved anywhere in the target
 is already present. Files with the same content form one group.
 
-**Sync is a dry run unless you explicitly pass `--execute`. yast never deletes
-target files or overwrites existing files.** This is content synchronization,
+**Sync and duplicate actions are dry runs unless you explicitly pass `--execute`.
+Sync never deletes target files; existing files are never overwritten.** This is content synchronization,
 not a directory mirror or a metadata/permissions backup.
 
 ## Installation
@@ -132,7 +132,8 @@ content sets return 0.
 ### `yast dupes <DIR>`
 
 Find duplicate content within one tree. Every group contains all matching paths;
-zero-byte files are included by default. This command never removes duplicates.
+zero-byte files are included by default. The default `--action report` never
+changes files and retains the existing report output.
 
 ```console
 yast dupes ./downloads --min-size 10MB
@@ -141,6 +142,62 @@ yast dupes ./downloads --hash xxh3 --format json
 ```
 
 Returns 1 if duplicates exist, otherwise 0.
+
+#### Duplicate actions
+
+Keep the **alphabetically first relative path** in each group and act on every
+other member. Actions only execute with `--execute`; otherwise they report a plan
+without creating directories, deleting, trashing, or moving files.
+
+```console
+yast dupes ./downloads --action delete                         # preview trash plan
+yast dupes ./downloads --action delete --execute               # use OS trash
+yast dupes ./downloads --action delete --permanent --execute   # irreversible deletion
+yast dupes ./downloads --action move --to ./duplicates         # preview relocation
+yast dupes ./downloads --action move --to ./duplicates --execute
+yast dupes ./downloads --action move --to ./duplicates --layout flatten --max-name-len 80 --execute
+```
+
+| Duplicate option | Default | Meaning |
+| --- | --- | --- |
+| `--action report\|delete\|move` | `report` | Report only, trash/delete, or relocate duplicates |
+| `--execute` | off | Execute delete/move; otherwise plan only |
+| `--permanent` | off | Only with delete: remove files permanently instead of trashing |
+| `--to DIR` | none | Required only with move; neither directory may contain the other |
+| `--layout keep\|flatten` | `keep` | Move with relative paths preserved or into one folder |
+| `--max-name-len N` | `64` | Flattened filename limit in Unicode characters; minimum 16 |
+
+Deletion defaults to Windows Recycle Bin, macOS Trash, or Linux freedesktop
+trash through the `trash` crate. A trash failure is reported as a failed action;
+there is **no fallback to permanent deletion**.
+
+Move accepts a nonexistent destination and resolves existing ancestors before
+checking overlap. `keep` reports existing destination paths as failed actions.
+`flatten` reuses sync naming, adding a deterministic BLAKE3 suffix for existing
+or planned collisions. Destination parents must be plain directories, not links.
+Moves use the platform's atomic no-replace rename on the same filesystem
+(`fs::rename` can overwrite, so it is not used directly). On a cross-device error, a temporary copy is
+assigned the source mtime, compared byte-for-byte, and published without clobbering
+before removing the source. A failure after publishing retains the destination
+copy and reports the error; the source is not removed if its safety recheck fails.
+
+Immediately before an action, both duplicate and keeper must still match their
+scanned size/mtime and each other **byte-for-byte**, using a streaming comparison
+even with a non-cryptographic `--hash`. Changes/mismatches fail that action without
+removing the file. Destructive actions reject symlink files and symlink parents,
+including ones selected with `--follow-symlinks`. These checks are not a filesystem
+snapshot: do not act on trees being concurrently modified by an untrusted process.
+
+Text includes an actions section; JSON adds `dedupe`; action CSV adds `keeper`
+and `action` columns to the existing columns and emits action/summary rows.
+Each action includes keeper and duplicate relative paths, `trash|delete|move`,
+destination (null/empty for deletion), size, `planned|done|failed`, and error.
+Summary `planned` counts all selected duplicates, `done`/`failed` count outcomes,
+and `bytes_planned` is their combined size. `bytes_reclaimed` counts logical
+bytes of completed permanent deletions only, not actual filesystem free space:
+trash and moves retain content, and hard links/compression can affect disk usage.
+Delete/move return **0** for success or a clean dry run, **2** if any action fails.
+Successful actions are not rolled back when another action fails.
 
 ### `yast sync <SOURCE> <TARGET>`
 
@@ -261,13 +318,14 @@ JSON has `command`, `comparison`, and (for sync) `sync`:
 `copied`, `skipped`, `failed`, and `actions` with absolute `source`/`destination`,
 `size`, `status` (`planned`, `copied`, `failed`) and nullable `error`.
 
-CSV uses columns
+Report-only and sync CSV use columns
 `category,group,size,digest,path,destination,status,error`.
 There is one row per content-group member, copy rows for sync actions, and a sync
 summary row with counters in `path`. Group numbers are local to each category;
 empty digests indicate skipped hashes. CSV quoting handles commas and newlines.
-Operational errors go to stderr and return 2; per-copy failures are also included
-in the sync report.
+Duplicate-action CSV appends `keeper,action` and uses the same summary-row
+convention. Operational errors go to stderr and return 2; per-file failures are
+also included in the sync or duplicate-action report.
 
 ## Performance and correctness
 
@@ -285,23 +343,24 @@ BLAKE3 is the recommended balance of speed and collision resistance. XXH3 uses a
 128-bit digest. CRC32/XXH3 are non-cryptographic, and MD5/SHA-1 are legacy choices:
 hash collisions can falsely classify different files as equal. Use BLAKE3 or
 SHA-256 for important data. Comparison uses `(size, digest)`, not a byte-for-byte
-post-hash check. Verification uses the selected algorithm, so it has the same
-collision limitations.
+post-hash check. Sync verification uses the selected algorithm, so it has the same
+collision limitations. Duplicate delete/move actions always compare bytes against
+the keeper before acting, regardless of the selected hash.
 
 For hundreds of thousands of files, use a release build, avoid network storage
 when possible, and adjust `--threads` to your disk (many workers may hurt HDDs).
 `--hash-all` trades the size/prefix shortcuts for complete digest reporting.
 There is no persistent cache; each run observes the current tree. Source
-size/mtime changes during hashing/copying are errors, but files modified while
-preserving both values cannot be detected reliably.
+size/mtime changes during hashing/copying are errors. Metadata checks alone cannot
+detect edits preserving both values; duplicate actions additionally compare bytes.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Compare identical with no duplicates; dupes has none; sync/dry-run succeeded |
-| `1` | Compare found differences/duplicates, or dupes found duplicates |
-| `2` | Invalid arguments, traversal/hash/report error, planning error, or any sync failure |
+| `0` | Compare identical with no duplicates; report-only dupes has none; sync or duplicate actions/dry-run succeeded |
+| `1` | Compare found differences/duplicates, or report-only dupes found duplicates |
+| `2` | Invalid arguments, traversal/hash/report error, planning error, or any sync/duplicate-action failure |
 
 ## Development
 

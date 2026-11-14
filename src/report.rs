@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::cli::Format;
 use crate::compare::{Comparison, ContentGroup};
 use crate::copy::SyncReport;
+use crate::dedupe::DedupeReport;
 
 #[derive(Serialize)]
 pub struct Report {
@@ -13,6 +14,8 @@ pub struct Report {
     pub comparison: Comparison,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedupe: Option<DedupeReport>,
 }
 
 pub fn write(report: &Report, format: Format, output: &mut dyn Write) -> Result<()> {
@@ -25,6 +28,47 @@ pub fn write(report: &Report, format: Format, output: &mut dyn Write) -> Result<
         Format::Csv => csv(report, output)?,
     }
     output.flush()?;
+    Ok(())
+}
+
+fn text_actions(report: &Report, output: &mut dyn Write) -> Result<()> {
+    if let Some(dedupe) = &report.dedupe {
+        if dedupe.dry_run {
+            writeln!(
+                output,
+                "DRY RUN: no files will be deleted or moved (use --execute to act)"
+            )?;
+        }
+        writeln!(output, "Actions:")?;
+        for action in &dedupe.actions {
+            writeln!(
+                output,
+                "{}: {} {} ({} bytes; keeper: {}; destination: {})",
+                action.status,
+                action.action,
+                action.path.display(),
+                action.size,
+                action.keeper.display(),
+                action
+                    .destination
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "-".into()),
+            )?;
+            if let Some(error) = &action.error {
+                writeln!(output, "  ERROR: {error}")?;
+            }
+        }
+        writeln!(
+            output,
+            "Planned: {}; done: {}; failed: {}; bytes planned: {}; bytes reclaimed: {}",
+            dedupe.planned,
+            dedupe.done,
+            dedupe.failed,
+            dedupe.bytes_planned,
+            dedupe.bytes_reclaimed
+        )?;
+    }
     Ok(())
 }
 
@@ -88,12 +132,13 @@ fn text(report: &Report, output: &mut dyn Write) -> Result<()> {
             sync.planned, sync.copied, sync.skipped, sync.failed
         )?;
     }
+    text_actions(report, output)?;
     Ok(())
 }
 
 fn csv(report: &Report, output: &mut dyn Write) -> Result<()> {
     let mut writer = csv::Writer::from_writer(output);
-    writer.write_record([
+    let mut header = vec![
         "category",
         "group",
         "size",
@@ -102,11 +147,15 @@ fn csv(report: &Report, output: &mut dyn Write) -> Result<()> {
         "destination",
         "status",
         "error",
-    ])?;
+    ];
+    if report.dedupe.is_some() {
+        header.extend(["keeper", "action"]);
+    }
+    writer.write_record(header)?;
     for (category, groups) in categories(report) {
         for (index, group) in groups.iter().enumerate() {
             for path in &group.paths {
-                writer.write_record([
+                let mut row = vec![
                     category.to_owned(),
                     (index + 1).to_string(),
                     group.size.to_string(),
@@ -115,7 +164,11 @@ fn csv(report: &Report, output: &mut dyn Write) -> Result<()> {
                     String::new(),
                     String::new(),
                     String::new(),
-                ])?;
+                ];
+                if report.dedupe.is_some() {
+                    row.extend([String::new(), String::new()]);
+                }
+                writer.write_record(row)?;
             }
         }
     }
@@ -143,6 +196,50 @@ fn csv(report: &Report, output: &mut dyn Write) -> Result<()> {
             ),
             String::new(),
             if sync.dry_run { "dry_run" } else { "executed" }.into(),
+            String::new(),
+        ])?;
+    }
+    if let Some(dedupe) = &report.dedupe {
+        for action in &dedupe.actions {
+            writer.write_record([
+                "action".to_owned(),
+                String::new(),
+                action.size.to_string(),
+                String::new(),
+                action.path.to_string_lossy().into_owned(),
+                action
+                    .destination
+                    .as_deref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                action.status.to_owned(),
+                action.error.clone().unwrap_or_default(),
+                action.keeper.to_string_lossy().into_owned(),
+                action.action.to_owned(),
+            ])?;
+        }
+        writer.write_record([
+            "summary".to_owned(),
+            String::new(),
+            String::new(),
+            String::new(),
+            format!(
+                "planned={};done={};failed={};bytes_planned={};bytes_reclaimed={}",
+                dedupe.planned,
+                dedupe.done,
+                dedupe.failed,
+                dedupe.bytes_planned,
+                dedupe.bytes_reclaimed
+            ),
+            String::new(),
+            if dedupe.dry_run {
+                "dry_run"
+            } else {
+                "executed"
+            }
+            .into(),
+            String::new(),
+            String::new(),
             String::new(),
         ])?;
     }

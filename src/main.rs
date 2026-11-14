@@ -1,6 +1,7 @@
 mod cli;
 mod compare;
 mod copy;
+mod dedupe;
 mod hash;
 mod naming;
 mod report;
@@ -15,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, DupesAction};
 use report::Report;
 
 fn main() -> ExitCode {
@@ -37,6 +38,9 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8> {
+    if let Command::Dupes { options, .. } = &cli.command {
+        options.validate()?;
+    }
     let threads = cli.common.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(usize::from)
@@ -57,13 +61,24 @@ fn run(cli: Cli) -> Result<u8> {
     let result = pool.install(|| -> Result<Report> {
         let (source, target, command) = match &cli.command {
             Command::Compare { source, target } => (source, Some(target), "compare"),
-            Command::Dupes { dir } => (dir, None, "dupes"),
+            Command::Dupes { dir, .. } => (dir, None, "dupes"),
             Command::Sync { source, target, .. } => (source, Some(target), "sync"),
         };
         let source_root = source
             .canonicalize()
             .with_context(|| format!("resolving {}", source.display()))?;
         let target_root = target.map(|path| resolve(path)).transpose()?;
+        let move_root = if let Command::Dupes { options, .. } = &cli.command {
+            options.to.as_deref().map(resolve).transpose()?
+        } else {
+            None
+        };
+        if let Some(target) = &move_root {
+            anyhow::ensure!(
+                !target.starts_with(&source_root) && !source_root.starts_with(target),
+                "move requires non-overlapping DIR and --to directories"
+            );
+        }
         if command == "sync" {
             let target = target_root.as_ref().context("missing target")?;
             anyhow::ensure!(
@@ -95,10 +110,27 @@ fn run(cli: Cli) -> Result<u8> {
         } else {
             None
         };
+        let dedupe = if let Command::Dupes { options, .. } = &cli.command {
+            if options.action == DupesAction::Report {
+                None
+            } else {
+                Some(dedupe::dedupe(
+                    &source_root,
+                    &source_files,
+                    &comparison,
+                    options,
+                    move_root.as_deref(),
+                    &progress,
+                )?)
+            }
+        } else {
+            None
+        };
         Ok(Report {
             command,
             comparison,
             sync,
+            dedupe,
         })
     });
     progress.finish_and_clear();
@@ -122,6 +154,12 @@ fn run(cli: Cli) -> Result<u8> {
     }
     Ok(if let Some(sync) = &report.sync {
         if sync.failed > 0 {
+            2
+        } else {
+            0
+        }
+    } else if let Some(dedupe) = &report.dedupe {
+        if dedupe.failed > 0 {
             2
         } else {
             0

@@ -106,6 +106,295 @@ fn dupes_and_filters() {
 }
 
 #[test]
+fn dupes_report_default_output_is_unchanged() {
+    let dir = TempDir::new().unwrap();
+    put(dir.path(), "a", "same");
+    put(dir.path(), "b", "same");
+    for format in ["text", "json", "csv"] {
+        let default = yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--format", format])
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        let explicit = yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--action", "report", "--format", format])
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(default, explicit);
+        if format == "json" {
+            let value: Value = serde_json::from_slice(&default).unwrap();
+            assert!(value.get("dedupe").is_none());
+        }
+    }
+}
+
+#[test]
+fn dupes_actions_are_dry_runs_by_default_in_all_report_formats() {
+    let dir = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new");
+    put(dir.path(), "a", "same");
+    put(dir.path(), "b", "same");
+    for action in ["delete", "move"] {
+        for format in ["text", "json", "csv"] {
+            let mut command = yast();
+            command
+                .arg("dupes")
+                .arg(dir.path())
+                .args(["--action", action, "--format", format]);
+            if action == "move" {
+                command.arg("--to").arg(&target);
+            }
+            let output = command.assert().success().get_output().stdout.clone();
+            match format {
+                "json" => {
+                    let value: Value = serde_json::from_slice(&output).unwrap();
+                    assert_eq!(value["dedupe"]["dry_run"], true);
+                    assert_eq!(value["dedupe"]["done"], 0);
+                    assert_eq!(value["dedupe"]["failed"], 0);
+                    assert_eq!(value["dedupe"]["bytes_reclaimed"], 0);
+                    let selected = &value["dedupe"]["actions"][0];
+                    assert_eq!(selected["keeper"], "a");
+                    assert_eq!(selected["path"], "b");
+                    assert_eq!(selected["size"], 4);
+                    assert_eq!(selected["status"], "planned");
+                    assert_eq!(
+                        selected["action"],
+                        if action == "delete" { "trash" } else { "move" }
+                    );
+                    assert!(selected["error"].is_null());
+                    assert_eq!(selected["destination"].is_null(), action == "delete");
+                }
+                "csv" => {
+                    let mut reader = csv::Reader::from_reader(&output[..]);
+                    assert_eq!(reader.headers().unwrap().get(8), Some("keeper"));
+                    assert_eq!(reader.headers().unwrap().get(9), Some("action"));
+                    let rows: Vec<_> = reader.records().map(Result::unwrap).collect();
+                    let selected = rows
+                        .iter()
+                        .find(|row| row.get(0) == Some("action"))
+                        .unwrap();
+                    assert_eq!(selected.get(4), Some("b"));
+                    assert_eq!(selected.get(6), Some("planned"));
+                    assert_eq!(selected.get(8), Some("a"));
+                    assert_eq!(
+                        selected.get(9),
+                        Some(if action == "delete" { "trash" } else { "move" })
+                    );
+                    assert_eq!(rows.last().unwrap().get(0), Some("summary"));
+                }
+                _ => {
+                    let text = String::from_utf8(output).unwrap();
+                    assert!(text.contains("DRY RUN"));
+                    assert!(text.contains("Actions:"));
+                    assert!(text.contains("keeper: a"));
+                    assert!(text.contains("bytes reclaimed: 0"));
+                }
+            }
+            assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+            assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
+            assert!(!target.exists());
+        }
+    }
+}
+
+#[test]
+fn dupes_permanent_delete_keeps_first_path_and_unrelated_content() {
+    let dir = TempDir::new().unwrap();
+    put(dir.path(), "a.txt", "same");
+    put(dir.path(), "nested/z.txt", "same");
+    put(dir.path(), "z.txt", "same");
+    put(dir.path(), "unique", "different");
+    put(dir.path(), "empty-a", "");
+    put(dir.path(), "empty-b", "");
+    let result = report(
+        yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--action", "delete", "--permanent"]),
+        0,
+    );
+    assert_eq!(result["dedupe"]["actions"][0]["action"], "delete");
+    assert!(dir.path().join("z.txt").exists());
+    let result = report(
+        yast().arg("dupes").arg(dir.path()).args([
+            "--action",
+            "delete",
+            "--permanent",
+            "--execute",
+        ]),
+        0,
+    );
+    assert_eq!(result["dedupe"]["done"], 3);
+    assert_eq!(result["dedupe"]["failed"], 0);
+    assert_eq!(result["dedupe"]["bytes_reclaimed"], 8);
+    assert!(result["dedupe"]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|action| action["status"] == "done"));
+    assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"same");
+    assert_eq!(fs::read(dir.path().join("unique")).unwrap(), b"different");
+    assert!(dir.path().join("empty-a").exists());
+    assert!(!dir.path().join("empty-b").exists());
+    assert!(!dir.path().join("nested/z.txt").exists());
+    assert!(!dir.path().join("z.txt").exists());
+    yast().arg("dupes").arg(dir.path()).assert().success();
+}
+
+#[test]
+fn dupes_move_keep_preserves_paths_content_and_mtime() {
+    let dir = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new");
+    put(dir.path(), "a.txt", "same");
+    put(dir.path(), "nested/z.txt", "same");
+    let modified = fs::metadata(dir.path().join("nested/z.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let result = report(
+        yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--action", "move", "--to"])
+            .arg(&target)
+            .arg("--execute"),
+        0,
+    );
+    assert_eq!(result["dedupe"]["done"], 1);
+    assert_eq!(result["dedupe"]["bytes_reclaimed"], 0);
+    assert!(dir.path().join("a.txt").exists());
+    assert!(!dir.path().join("nested/z.txt").exists());
+    assert_eq!(fs::read(target.join("nested/z.txt")).unwrap(), b"same");
+    assert_eq!(
+        fs::metadata(target.join("nested/z.txt"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+}
+
+#[test]
+fn dupes_move_flatten_disambiguates_existing_and_planned_collisions() {
+    for existing in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        put(dir.path(), "0.txt", "same");
+        put(dir.path(), "a/b.txt", "same");
+        put(dir.path(), "a_b.txt", "same");
+        if existing {
+            put(target.path(), "a_b.txt", "existing");
+        }
+        let result = report(
+            yast()
+                .arg("dupes")
+                .arg(dir.path())
+                .args(["--action", "move", "--to"])
+                .arg(target.path())
+                .args(["--layout", "flatten", "--max-name-len", "24", "--execute"]),
+            0,
+        );
+        assert_eq!(result["dedupe"]["done"], 2);
+        let actions = result["dedupe"]["actions"].as_array().unwrap();
+        assert_ne!(actions[0]["destination"], actions[1]["destination"]);
+        for action in actions {
+            let destination = Path::new(action["destination"].as_str().unwrap());
+            assert_eq!(
+                destination.parent(),
+                Some(target.path().canonicalize().unwrap().as_path())
+            );
+            let name = destination.file_name().unwrap().to_string_lossy();
+            assert!(name.chars().count() <= 24 && name.ends_with(".txt"));
+            assert_eq!(fs::read(destination).unwrap(), b"same");
+        }
+        if existing {
+            assert_eq!(
+                fs::read(target.path().join("a_b.txt")).unwrap(),
+                b"existing"
+            );
+        }
+        assert!(dir.path().join("0.txt").exists());
+        assert!(!dir.path().join("a/b.txt").exists());
+        assert!(!dir.path().join("a_b.txt").exists());
+    }
+}
+
+#[test]
+fn dupes_move_reports_conflicts_without_overwriting_and_continues_other_actions() {
+    let dir = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    put(dir.path(), "a", "same");
+    put(dir.path(), "b", "same");
+    put(dir.path(), "c", "same");
+    put(target.path(), "b", "existing");
+    let result = report(
+        yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--action", "move", "--to"])
+            .arg(target.path())
+            .arg("--execute"),
+        2,
+    );
+    assert_eq!(result["dedupe"]["failed"], 1);
+    assert_eq!(result["dedupe"]["done"], 1);
+    assert_eq!(result["dedupe"]["actions"][0]["status"], "failed");
+    assert!(result["dedupe"]["actions"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("not overwritten"));
+    assert_eq!(fs::read(target.path().join("b")).unwrap(), b"existing");
+    assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
+    assert_eq!(fs::read(target.path().join("c")).unwrap(), b"same");
+    assert!(dir.path().join("a").exists());
+}
+
+#[test]
+fn dupes_rejects_overlapping_destinations_and_invalid_options() {
+    let parent = TempDir::new().unwrap();
+    let dir = parent.path().join("source");
+    fs::create_dir(&dir).unwrap();
+    for target in [
+        dir.join("nested"),
+        dir.clone(),
+        parent.path().to_path_buf(),
+        dir.join("missing/../nested"),
+    ] {
+        yast()
+            .arg("dupes")
+            .arg(&dir)
+            .args(["--action", "move", "--to"])
+            .arg(&target)
+            .assert()
+            .code(2);
+    }
+    for args in [
+        vec!["--to", "target"],
+        vec!["--action", "delete", "--to", "target"],
+        vec!["--action", "move"],
+        vec!["--permanent"],
+        vec!["--action", "move", "--to", "target", "--permanent"],
+        vec!["--execute"],
+        vec!["--action", "delete", "--layout", "flatten"],
+        vec!["--action", "move", "--to", "target", "--max-name-len", "15"],
+    ] {
+        yast().arg("dupes").arg(&dir).args(args).assert().code(2);
+    }
+    assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn size_filter_and_partial_hash_never_hide_equal_size_differences() {
     let source = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
@@ -350,6 +639,56 @@ fn all_hash_algorithms_and_invalid_inputs() {
         .arg(source.path().join("missing"))
         .assert()
         .code(2);
+}
+
+#[cfg(unix)]
+#[test]
+fn dupes_move_rejects_symlink_parents_and_delete_rejects_symlink_members() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    put(dir.path(), "a", "same");
+    put(dir.path(), "nested/b", "same");
+    symlink(outside.path(), target.path().join("nested")).unwrap();
+    let result = report(
+        yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--action", "move", "--to"])
+            .arg(target.path())
+            .arg("--execute"),
+        2,
+    );
+    assert_eq!(result["dedupe"]["failed"], 1);
+    assert!(result["dedupe"]["actions"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("plain directory"));
+    assert_eq!(fs::read(dir.path().join("nested/b")).unwrap(), b"same");
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+
+    symlink(dir.path().join("a"), dir.path().join("0-link")).unwrap();
+    let result = report(
+        yast().arg("dupes").arg(dir.path()).args([
+            "--follow-symlinks",
+            "--action",
+            "delete",
+            "--permanent",
+            "--execute",
+        ]),
+        2,
+    );
+    assert_eq!(result["dedupe"]["done"], 0);
+    assert!(dir
+        .path()
+        .join("0-link")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+    assert_eq!(fs::read(dir.path().join("nested/b")).unwrap(), b"same");
 }
 
 #[cfg(unix)]
