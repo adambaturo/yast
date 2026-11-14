@@ -201,6 +201,8 @@ Delete/move return **0** for success or a clean dry run, **2** if any action fai
 Successful actions are not rolled back when another action fails.
 An `--output` file is reserved after scanning but before actions execute:
 an existing or uncreatable report path fails without modifying duplicates.
+JSON reports require UTF-8 duplicate paths and move destinations; incompatible
+paths are rejected before any duplicate action executes.
 
 ### `yast sync <SOURCE> <TARGET>`
 

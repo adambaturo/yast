@@ -643,6 +643,104 @@ fn all_hash_algorithms_and_invalid_inputs() {
 
 #[cfg(unix)]
 #[test]
+fn non_utf8_json_paths_are_rejected_before_duplicate_actions() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    for action in ["delete", "move"] {
+        let dir = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        put(dir.path(), "a", "same");
+        let duplicate = dir.path().join(OsString::from_vec(b"z-\xff".to_vec()));
+        fs::write(&duplicate, b"same").unwrap();
+        let output = dir.path().join("report.json");
+        let mut command = yast();
+        command
+            .arg("dupes")
+            .arg(dir.path())
+            .args([
+                "--action",
+                action,
+                "--execute",
+                "--format",
+                "json",
+                "--output",
+            ])
+            .arg(&output);
+        if action == "delete" {
+            command.arg("--permanent");
+        } else {
+            command.arg("--to").arg(target.path());
+        }
+        let result = command.assert().code(2).get_output().clone();
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("validating duplicate report paths")
+        );
+        assert!(result.stdout.is_empty());
+        assert!(!output.exists());
+        assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+        assert_eq!(fs::read(&duplicate).unwrap(), b"same");
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    let dir = TempDir::new().unwrap();
+    let parent = TempDir::new().unwrap();
+    put(dir.path(), "a", "same");
+    put(dir.path(), "b", "same");
+    let target = parent
+        .path()
+        .join(OsString::from_vec(b"destination-\xff".to_vec()));
+    let result = yast()
+        .arg("dupes")
+        .arg(dir.path())
+        .args(["--action", "move", "--execute", "--format", "json", "--to"])
+        .arg(&target)
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    assert!(String::from_utf8_lossy(&result.stderr).contains("validating duplicate report paths"));
+    assert!(result.stdout.is_empty());
+    assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+    assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
+    assert!(!target.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn dupes_move_rejects_a_drive_root_containing_source() {
+    use std::path::{Component, PathBuf, Prefix};
+    let dir = TempDir::new().unwrap();
+    put(dir.path(), "a", "same");
+    put(dir.path(), "b", "same");
+    let drive = match dir.path().components().next().unwrap() {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => panic!("expected a drive-based temporary directory"),
+        },
+        _ => panic!("expected a drive prefix"),
+    };
+    let root = PathBuf::from(format!("{}:\\", char::from(drive)));
+    for command in ["dupes", "sync"] {
+        let mut invocation = yast();
+        invocation.arg(command).arg(dir.path());
+        if command == "dupes" {
+            invocation.args(["--action", "move", "--to"]);
+        }
+        let result = invocation
+            .arg(&root)
+            .arg("--execute")
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert!(String::from_utf8_lossy(&result.stderr).contains("non-overlapping"));
+        assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
+        assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn dupes_move_resolves_symlinks_before_parent_components() {
     use std::os::unix::fs::symlink;
     let parent = TempDir::new().unwrap();

@@ -98,6 +98,10 @@ fn run(cli: Cli) -> Result<u8> {
         if command == "dupes" {
             comparison.missing.clear();
         }
+        if command == "dupes" && matches!(cli.common.format, cli::Format::Json) {
+            serde_json::to_writer(io::sink(), &(&comparison, &move_root))
+                .context("validating duplicate report paths for JSON before actions")?;
+        }
         // Reserve output after scanning so it is not scanned, but before modifying files.
         let output = cli
             .common
@@ -200,6 +204,12 @@ fn resolve(path: &Path) -> Result<PathBuf> {
                 normalized.pop();
             }
             Component::CurDir => {}
+            Component::RootDir => {
+                normalized.push(component.as_os_str());
+                normalized = normalized
+                    .canonicalize()
+                    .with_context(|| format!("resolving root {}", normalized.display()))?;
+            }
             Component::Normal(value) => {
                 normalized.push(value);
                 match fs::symlink_metadata(&normalized) {
@@ -219,4 +229,36 @@ fn resolve(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::path::Prefix;
+
+    #[test]
+    fn drive_root_and_missing_top_level_destination_use_canonical_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let drive = match temp.path().components().next().unwrap() {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+                _ => panic!("expected a drive-based temporary directory"),
+            },
+            _ => panic!("expected a drive prefix"),
+        };
+        let root = PathBuf::from(format!("{}:\\", char::from(drive)));
+        let canonical_root = root.canonicalize().unwrap();
+        assert_eq!(resolve(&root).unwrap(), canonical_root);
+        assert!(temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .starts_with(resolve(&root).unwrap()));
+
+        let missing = root.join(temp.path().file_name().unwrap());
+        assert!(!missing.exists());
+        let resolved = resolve(&missing).unwrap();
+        assert_eq!(resolved, canonical_root.join(missing.file_name().unwrap()));
+        assert!(resolved.starts_with(&canonical_root));
+    }
 }
