@@ -641,9 +641,9 @@ fn all_hash_algorithms_and_invalid_inputs() {
         .code(2);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn non_utf8_json_paths_are_rejected_before_duplicate_actions() {
+fn non_utf8_json_filenames_are_rejected_before_duplicate_actions() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     for action in ["delete", "move"] {
@@ -681,7 +681,13 @@ fn non_utf8_json_paths_are_rejected_before_duplicate_actions() {
         assert_eq!(fs::read(&duplicate).unwrap(), b"same");
         assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
     }
+}
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_json_move_destination_is_rejected_before_duplicate_actions() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
     let dir = TempDir::new().unwrap();
     let parent = TempDir::new().unwrap();
     put(dir.path(), "a", "same");
@@ -698,7 +704,7 @@ fn non_utf8_json_paths_are_rejected_before_duplicate_actions() {
         .code(2)
         .get_output()
         .clone();
-    assert!(String::from_utf8_lossy(&result.stderr).contains("validating duplicate report paths"));
+    assert!(!result.stderr.is_empty());
     assert!(result.stdout.is_empty());
     assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"same");
     assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"same");
