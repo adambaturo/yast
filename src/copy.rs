@@ -54,42 +54,17 @@ pub fn sync(
     let mut planned = Vec::new();
     for group in &comparison.missing {
         let file = lookup[group.paths[0].as_path()];
-        let destination = if options.layout == Layout::Keep {
-            let path = destination_root.join(&file.relative);
-            anyhow::ensure!(
-                !occupied(&path)?,
-                "destination already exists (not overwritten): {}",
-                path.display()
-            );
-            path
-        } else {
-            let mut path =
-                destination_root.join(flatten(&file.relative, options.max_name_len, None));
-            let mut collision = 0u64;
-            while occupied(&path)? || reserved.contains(&path_key(&path)) {
-                let digest =
-                    blake3::hash(format!("{}:{collision}", file.relative.display()).as_bytes());
-                let suffix = &digest.to_hex().to_string()[..10];
-                path = destination_root.join(flatten(
-                    &file.relative,
-                    options.max_name_len,
-                    Some(suffix),
-                ));
-                collision = collision
-                    .checked_add(1)
-                    .context("collision counter overflow")?;
-            }
-            path
-        };
+        let destination = destination(
+            &destination_root,
+            &file.relative,
+            options.layout,
+            options.max_name_len,
+            &mut reserved,
+        )?;
         check_parents(
             target,
             destination.parent().context("destination without parent")?,
         )?;
-        anyhow::ensure!(
-            reserved.insert(path_key(&destination)),
-            "duplicate destination: {}",
-            destination.display()
-        );
         planned.push((file, destination));
     }
     progress.set_message(if options.execute {
@@ -141,7 +116,44 @@ pub fn sync(
     })
 }
 
-fn occupied(path: &Path) -> Result<bool> {
+pub(crate) fn destination(
+    root: &Path,
+    relative: &Path,
+    layout: Layout,
+    max_name_len: usize,
+    reserved: &mut HashSet<String>,
+) -> Result<PathBuf> {
+    let mut path = if layout == Layout::Keep {
+        root.join(relative)
+    } else {
+        root.join(flatten(relative, max_name_len, None))
+    };
+    if layout == Layout::Keep {
+        anyhow::ensure!(
+            !occupied(&path)?,
+            "destination already exists (not overwritten): {}",
+            path.display()
+        );
+    } else {
+        let mut collision = 0u64;
+        while occupied(&path)? || reserved.contains(&path_key(&path)) {
+            let digest = blake3::hash(format!("{}:{collision}", relative.display()).as_bytes());
+            let suffix = &digest.to_hex().to_string()[..10];
+            path = root.join(flatten(relative, max_name_len, Some(suffix)));
+            collision = collision
+                .checked_add(1)
+                .context("collision counter overflow")?;
+        }
+    }
+    anyhow::ensure!(
+        reserved.insert(path_key(&path)),
+        "duplicate destination: {}",
+        path.display()
+    );
+    Ok(path)
+}
+
+pub(crate) fn occupied(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -149,11 +161,11 @@ fn occupied(path: &Path) -> Result<bool> {
     }
 }
 
-fn path_key(path: &Path) -> String {
+pub(crate) fn path_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-fn check_parents(root: &Path, parent: &Path) -> Result<()> {
+pub(crate) fn check_parents(root: &Path, parent: &Path) -> Result<()> {
     let mut current = root.to_path_buf();
     let mut paths = vec![current.clone()];
     for component in parent.strip_prefix(root)?.components() {
@@ -187,6 +199,25 @@ fn copy_one(
     algorithm: Algorithm,
     verify: bool,
 ) -> Result<()> {
+    let temporary = stage_copy(file, root, destination)?;
+    if verify {
+        let expected = hash_file(&file.path, algorithm, None)?;
+        let actual = hash_file(temporary.path(), algorithm, None)?;
+        ensure_unchanged(file)?;
+        anyhow::ensure!(
+            expected == actual,
+            "verification failed for {}",
+            destination.display()
+        );
+    }
+    publish(temporary, destination)
+}
+
+pub(crate) fn stage_copy(
+    file: &FileEntry,
+    root: &Path,
+    destination: &Path,
+) -> Result<tempfile::NamedTempFile> {
     ensure_unchanged(file)?;
     let parent = destination.parent().context("destination without parent")?;
     check_parents(root, parent)?;
@@ -201,16 +232,10 @@ fn copy_one(
         temporary.path(),
         filetime::FileTime::from_system_time(file.modified),
     )?;
-    if verify {
-        let expected = hash_file(&file.path, algorithm, None)?;
-        let actual = hash_file(temporary.path(), algorithm, None)?;
-        ensure_unchanged(file)?;
-        anyhow::ensure!(
-            expected == actual,
-            "verification failed for {}",
-            destination.display()
-        );
-    }
+    Ok(temporary)
+}
+
+pub(crate) fn publish(temporary: tempfile::NamedTempFile, destination: &Path) -> Result<()> {
     temporary.as_file().sync_all()?;
     temporary
         .persist_noclobber(destination)

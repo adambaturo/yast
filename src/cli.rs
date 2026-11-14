@@ -27,9 +27,13 @@ pub enum Command {
     Compare { source: PathBuf, target: PathBuf },
     /// Find duplicate content within one directory.
     #[command(
-        after_help = "EXAMPLES:\n  yast dupes downloads\n  yast dupes downloads --min-size 10MiB --skip-hidden\n  yast dupes downloads --exclude '*.part' --format csv"
+        after_help = "EXAMPLES:\n  yast dupes downloads\n  yast dupes downloads --min-size 10MiB --skip-hidden\n  yast dupes downloads --exclude '*.part' --format csv\n  yast dupes downloads --action delete\n  yast dupes downloads --action delete --execute\n  yast dupes downloads --action delete --permanent --execute\n  yast dupes downloads --action move --to duplicates --layout flatten --execute\n\nActions keep the alphabetically first relative path in each group. Dry run unless --execute.\nDelete uses OS trash unless --permanent. Move destinations must not overlap DIR and are never overwritten."
     )]
-    Dupes { dir: PathBuf },
+    Dupes {
+        dir: PathBuf,
+        #[command(flatten)]
+        options: DupesOptions,
+    },
     /// Copy missing content, once per content group. Dry run unless --execute.
     #[command(
         after_help = "EXAMPLES:\n  yast sync photos backup\n  yast sync photos backup --execute --verify\n  yast sync photos backup --layout flatten --dest-subdir incoming --execute\n\nExisting destination files are never overwritten. Extras are never deleted."
@@ -75,6 +79,56 @@ pub struct Common {
     /// Emit diagnostic counters on stderr.
     #[arg(short = 'v', global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct DupesOptions {
+    #[arg(long, value_enum, default_value = "report")]
+    pub action: DupesAction,
+    /// Actually delete or move duplicates. Otherwise only print the plan.
+    #[arg(long)]
+    pub execute: bool,
+    /// Delete permanently instead of using OS trash; only with --action delete.
+    #[arg(long)]
+    pub permanent: bool,
+    /// Destination directory; required and only valid with --action move.
+    #[arg(long, required_if_eq("action", "move"))]
+    pub to: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "keep")]
+    pub layout: Layout,
+    /// Maximum flattened filename length, in Unicode characters (minimum 16).
+    #[arg(long, default_value = "64", value_parser = name_length)]
+    pub max_name_len: usize,
+}
+
+impl DupesOptions {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.to.is_some() == (self.action == DupesAction::Move),
+            "--to is required and only valid with --action move"
+        );
+        anyhow::ensure!(
+            !self.permanent || self.action == DupesAction::Delete,
+            "--permanent is only valid with --action delete"
+        );
+        anyhow::ensure!(
+            !self.execute || self.action != DupesAction::Report,
+            "--execute requires --action delete or move"
+        );
+        anyhow::ensure!(
+            self.action == DupesAction::Move
+                || (self.layout == Layout::Keep && self.max_name_len == 64),
+            "--layout and --max-name-len are only valid with --action move"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum DupesAction {
+    Report,
+    Delete,
+    Move,
 }
 
 #[derive(Args, Debug)]
