@@ -7,6 +7,7 @@ use globset::{Glob, GlobSetBuilder};
 use ignore::{WalkBuilder, WalkState};
 
 use crate::cli::Common;
+use crate::progress::Progress;
 
 #[derive(Clone, Debug)]
 pub struct FileEntry {
@@ -16,7 +17,12 @@ pub struct FileEntry {
     pub modified: SystemTime,
 }
 
-pub fn scan(root: &Path, options: &Common, threads: usize) -> Result<Vec<FileEntry>> {
+pub fn scan(
+    root: &Path,
+    options: &Common,
+    threads: usize,
+    progress: &Progress,
+) -> Result<Vec<FileEntry>> {
     anyhow::ensure!(root.is_dir(), "not a directory: {}", root.display());
     let mut globs = GlobSetBuilder::new();
     for pattern in &options.exclude {
@@ -64,6 +70,7 @@ pub fn scan(root: &Path, options: &Common, threads: usize) -> Result<Vec<FileEnt
                     size: metadata.len(),
                     modified: metadata.modified()?,
                 });
+                progress.found_file();
                 Ok(())
             })();
             if let Err(error) = result {
@@ -106,4 +113,44 @@ pub fn ensure_unchanged(entry: &FileEntry) -> Result<()> {
         entry.path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn discovery_counts_only_included_files_and_restarts_for_target() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("included"), b"content").unwrap();
+        std::fs::write(root.path().join("excluded.tmp"), b"content").unwrap();
+        std::fs::write(root.path().join(".hidden"), b"content").unwrap();
+        std::fs::write(root.path().join("small"), b"x").unwrap();
+        let options = Cli::parse_from([
+            "yast",
+            "dupes",
+            ".",
+            "--exclude",
+            "*.tmp",
+            "--skip-hidden",
+            "--min-size",
+            "2",
+        ])
+        .common;
+        let progress = Progress::hidden();
+        progress.scanning("Scanning source");
+        let files = scan(root.path(), &options, 2, &progress).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(progress.files.position(), 1);
+        progress.inventory(files.len(), None);
+        // A second traversal must not accumulate the first directory's count.
+        progress.scanning("Scanning target");
+        let target = tempfile::tempdir().unwrap();
+        assert!(scan(target.path(), &options, 2, &progress)
+            .unwrap()
+            .is_empty());
+        assert_eq!(progress.files.position(), 0);
+    }
 }

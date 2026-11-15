@@ -4,6 +4,7 @@ mod copy;
 mod dedupe;
 mod hash;
 mod naming;
+mod progress;
 mod report;
 mod scan;
 
@@ -14,9 +15,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
 
 use cli::{Cli, Command, DupesAction};
+use progress::Progress;
 use report::Report;
 
 fn main() -> ExitCode {
@@ -49,15 +50,7 @@ fn run(cli: Cli) -> Result<u8> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()?;
-    let progress = if cli.common.quiet || !io::stderr().is_terminal() {
-        ProgressBar::hidden()
-    } else {
-        let bar = ProgressBar::new_spinner();
-        bar.set_style(ProgressStyle::with_template("{spinner} {msg} {pos}/{len}")?);
-        bar.enable_steady_tick(std::time::Duration::from_millis(100));
-        bar
-    };
-    progress.set_message("Scanning");
+    let progress = Progress::new(!cli.common.quiet && io::stderr().is_terminal());
     let result = pool.install(|| -> Result<(Report, Option<io::BufWriter<fs::File>>)> {
         let (source, target, command) = match &cli.command {
             Command::Compare { source, target } => (source, Some(target), "compare"),
@@ -86,13 +79,24 @@ fn run(cli: Cli) -> Result<u8> {
                 "sync requires non-overlapping source and target directories"
             );
         }
-        let source_files = scan::scan(&source_root, &cli.common, threads)?;
+        progress.scanning(if command == "dupes" {
+            "Scanning duplicate directory"
+        } else {
+            "Scanning source"
+        });
+        let source_files = scan::scan(&source_root, &cli.common, threads, &progress)?;
+        progress.inventory(source_files.len(), None);
         let target_files = match &target_root {
             Some(root) if root.exists() || command != "sync" => {
-                scan::scan(root, &cli.common, threads)?
+                progress.scanning("Scanning target");
+                scan::scan(root, &cli.common, threads, &progress)?
             }
             _ => Vec::new(),
         };
+        progress.inventory(
+            source_files.len(),
+            target_root.as_ref().map(|_| target_files.len()),
+        );
         let mut comparison =
             compare::compare(&source_files, &target_files, &cli.common, &progress)?;
         if command == "dupes" {
@@ -154,7 +158,7 @@ fn run(cli: Cli) -> Result<u8> {
             output,
         ))
     });
-    progress.finish_and_clear();
+    progress.finish();
     let (report, output) = result?;
     if cli.common.verbose > 0 && !cli.common.quiet {
         eprintln!(
