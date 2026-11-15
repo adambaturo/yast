@@ -8,6 +8,11 @@ is already present. Files with the same content form one group.
 Sync never deletes target files; existing files are never overwritten.** This is content synchronization,
 not a directory mirror or a metadata/permissions backup.
 
+## AI disclaimer
+
+Most of the code in this project is written by AI agents. The author's main goal
+is to learn Rust through hands-on collaboration with those agents.
+
 ## Installation
 
 Download your platform's archive and `SHA256SUMS.txt` from
