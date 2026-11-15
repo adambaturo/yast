@@ -58,6 +58,9 @@ pub struct Common {
     /// Write the report to this file instead of stdout.
     #[arg(long, global = true)]
     pub output: Option<PathBuf>,
+    /// Include only relative file paths matching these globs; repeatable, all if omitted.
+    #[arg(long, global = true)]
+    pub include: Vec<String>,
     /// Exclude relative paths matching this glob; may be repeated.
     #[arg(long, global = true)]
     pub exclude: Vec<String>,
