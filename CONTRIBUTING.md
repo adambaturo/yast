@@ -40,3 +40,19 @@ are the required checks once the main ruleset is enabled. No approving review
 is mandatory, but all applicable checks must pass. Merge using **Squash and
 merge** only; do not merge or push directly to `main`. Admin bypass is limited
 to the PR flow. Release PRs follow the same checks and merge process.
+
+## Local debugging in VS Code
+
+Install stable Rust and the platform's native build tools (on Windows, Visual
+Studio C++ Build Tools and a Windows SDK), plus the recommended
+[CodeLLDB extension](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb).
+Open the repository folder in VS Code, set a breakpoint, then choose a `yast:`
+profile in **Run and Debug** and press **F5**.
+
+The [launch profiles](.vscode/launch.json) build the debug binary with
+`cargo build --locked --bin yast` and prompt for directories. Relative paths
+resolve from the repository root; the source defaults to `src`, the comparison
+target to `tests`, and the sync target to `yast-debug-output`.
+The profiles cover comparison, duplicate reporting, and sync dry runs.
+None modifies the selected directories; sync does not pass `--execute`.
+Rust backtraces are enabled for all profiles.
