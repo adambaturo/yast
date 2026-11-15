@@ -75,8 +75,8 @@ ordering prevent a competing PR from bumping the initial version first.
 The `release: published` event starts six builds: static musl Linux x64/ARM64
 (cargo-zigbuild), macOS Intel/Apple Silicon, and Windows MSVC x64/ARM64. All use
 the tag's source, locked dependencies, and the release profile. Archives are
-`yast-vX.Y.Z-<target>.tar.gz` (Windows: `.zip`) with the binary, README, LICENSE,
-and CHANGELOG at the root. A final job calculates `SHA256SUMS.txt`, attests all
+`yast-vX.Y.Z-<target>.tar.gz` (Windows: `.zip`) with the binary, README, USAGE,
+LICENSE, and CHANGELOG at the root. A final job calculates `SHA256SUMS.txt`, attests all
 archives/checksums with GitHub build provenance, and uploads them to the release.
 No release assets are uploaded until every platform succeeds.
 

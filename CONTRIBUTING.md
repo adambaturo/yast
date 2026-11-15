@@ -17,6 +17,23 @@ or edit generated changelog entries in feature PRs. release-plz prepares those
 changes. During `0.x`, breaking changes bump minor; features and fixes bump
 patch. See [RELEASING.md](RELEASING.md) for promotion to stable.
 
+Releases use SemVer tags `vX.Y.Z`. release-plz prepares version/changelog PRs
+and publishes GitHub Releases (not crates.io); CI then attaches six platform
+archives, checksums, and provenance. See [CHANGELOG.md](CHANGELOG.md) for release
+history and [RELEASING.md](RELEASING.md) for the release process.
+
+## Development setup
+
+Install [stable Rust](https://rustup.rs/) and the platform's native build tools
+(on Windows, Visual Studio C++ Build Tools and a Windows SDK).
+From a checkout, build without installing:
+
+```console
+cargo build --release --locked
+```
+
+Run `target/release/yast` (`target\release\yast.exe` on Windows).
+
 ## Local checks
 
 Install stable Rust with rustfmt/clippy, then:
@@ -34,7 +51,8 @@ cargo deny --locked check
 and allowed dependency sources. Do not ignore advisories just to make CI pass.
 Use `actionlint` when modifying workflow YAML.
 
-CI checks all three desktop OSes, dependency policy, and the PR title. Resolve
+CI runs formatting, Clippy, and tests on Ubuntu, Windows, and macOS, and checks
+dependency policy and the PR title. Resolve
 review conversations and keep the branch up to date; `ci-ok` and `pr-title`
 are the required checks once the main ruleset is enabled. No approving review
 is mandatory, but all applicable checks must pass. Merge using **Squash and
@@ -56,3 +74,23 @@ target to `tests`, and the sync target to `yast-debug-output`.
 The profiles cover comparison, duplicate reporting, and sync dry runs.
 None modifies the selected directories; sync does not pass `--execute`.
 Rust backtraces are enabled for all profiles.
+
+## Implementation notes
+
+The parallel walker collects only path, size and modification time. Size counts
+across both trees immediately eliminate unique sizes. Same-size candidates are
+hashed over the first 64 KiB, then only matching prefixes require full streaming
+hashes. Small files need just one read. Full reads use chunks up to 1 MiB;
+per-file buffers shrink for small files. Rayon bounds hashing/copy concurrency.
+Buffered streaming avoids mmap hazards when files change during scanning.
+Memory is proportional to file/path counts and worker buffers, not file contents.
+The current implementation holds the inventory and report in memory rather than
+using an on-disk database.
+
+Files remain streamed with bounded buffers; interactive copying uses buffered
+I/O to report successful writes, while hidden progress retains native
+file-to-file copy optimizations where available.
+
+Duplicate deletion uses the `trash` crate for OS trash integration. Moves use
+the platform's atomic no-replace rename on the same filesystem; `fs::rename`
+can overwrite, so it is not used directly.

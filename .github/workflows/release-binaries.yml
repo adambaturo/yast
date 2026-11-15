@@ -102,7 +102,7 @@ jobs:
       - name: Stage archive
         run: |
           mkdir -p package dist
-          cp README.md LICENSE CHANGELOG.md package/
+          cp README.md USAGE.md LICENSE CHANGELOG.md package/
           if [ "$RUNNER_OS" = Windows ]; then
             cp "target/$TARGET/release/yast.exe" package/
           else
@@ -110,7 +110,7 @@ jobs:
           fi
       - name: Archive Unix binary
         if: runner.os != 'Windows'
-        run: tar -czf "dist/yast-$TAG-$TARGET.tar.gz" -C package yast README.md LICENSE CHANGELOG.md
+        run: tar -czf "dist/yast-$TAG-$TARGET.tar.gz" -C package yast README.md USAGE.md LICENSE CHANGELOG.md
       - name: Archive Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
