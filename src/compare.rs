@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
-use indicatif::ProgressBar;
 use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::cli::Common;
 use crate::hash::{hash_file, PREFIX_BYTES};
+use crate::progress::Progress;
 use crate::scan::{ensure_unchanged, FileEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,7 +48,7 @@ pub fn compare(
     source: &[FileEntry],
     target: &[FileEntry],
     options: &Common,
-    progress: &ProgressBar,
+    progress: &Progress,
 ) -> Result<Comparison> {
     let files: Vec<_> = source.iter().chain(target).collect();
     let mut sizes: HashMap<u64, usize> = HashMap::new();
@@ -58,15 +58,26 @@ pub fn compare(
     let candidates: Vec<usize> = (0..files.len())
         .filter(|&i| options.hash_all || sizes[&files[i].size] > 1)
         .collect();
-    progress.set_length(candidates.len() as u64);
-    progress.set_message("Hashing prefixes");
+    progress.phase("Hashing prefixes (files)", candidates.len());
+    progress.byte_phase(
+        "Prefix bytes",
+        candidates
+            .iter()
+            .map(|&i| files[i].size.min(PREFIX_BYTES))
+            .sum(),
+    );
     let prefixes: Vec<(usize, String)> = candidates
         .par_iter()
         .map(|&i| {
             ensure_unchanged(files[i])?;
-            let digest = hash_file(&files[i].path, options.hash, Some(PREFIX_BYTES))?;
+            let digest = hash_file(
+                &files[i].path,
+                options.hash,
+                Some(PREFIX_BYTES),
+                &progress.bytes,
+            )?;
             ensure_unchanged(files[i])?;
-            progress.inc(1);
+            progress.completed();
             Ok((i, digest))
         })
         .collect::<Result<_>>()?;
@@ -87,16 +98,18 @@ pub fn compare(
             full_candidates.extend(indices);
         }
     }
-    progress.set_position(0);
-    progress.set_length(full_candidates.len() as u64);
-    progress.set_message("Hashing full files");
+    progress.phase("Hashing full files (files)", full_candidates.len());
+    progress.byte_phase(
+        "Full hash bytes",
+        full_candidates.iter().map(|&i| files[i].size).sum(),
+    );
     let full: Vec<_> = full_candidates
         .par_iter()
         .map(|&i| {
             ensure_unchanged(files[i])?;
-            let digest = hash_file(&files[i].path, options.hash, None)?;
+            let digest = hash_file(&files[i].path, options.hash, None, &progress.bytes)?;
             ensure_unchanged(files[i])?;
-            progress.inc(1);
+            progress.completed();
             Ok((i, digest))
         })
         .collect::<Result<_>>()?;
@@ -192,7 +205,7 @@ mod tests {
             entry(root.path(), "extra2", b"extra"),
         ];
         let options = Cli::parse_from(["yast", "dupes", "."]).common;
-        let result = compare(&source, &target, &options, &ProgressBar::hidden()).unwrap();
+        let result = compare(&source, &target, &options, &Progress::hidden()).unwrap();
         assert_eq!(
             result.common[0].paths,
             [std::path::PathBuf::from("a"), "b".into()]
@@ -210,14 +223,18 @@ mod tests {
         let source = vec![entry(root.path(), "a", &vec![b'a'; 70_000])];
         let target = vec![entry(root.path(), "b", &vec![b'b'; 70_000])];
         let mut options = Cli::parse_from(["yast", "dupes", "."]).common;
-        let result = compare(&source, &target, &options, &ProgressBar::hidden()).unwrap();
+        let result = compare(&source, &target, &options, &Progress::hidden()).unwrap();
         assert_eq!(result.partial_hashed_files, 2);
         assert_eq!(result.hashed_files, 0);
         assert_eq!(result.missing.len(), 1);
         assert_eq!(result.extra.len(), 1);
         options.hash_all = true;
-        let full = compare(&source, &target, &options, &ProgressBar::hidden()).unwrap();
+        let progress = Progress::hidden();
+        let full = compare(&source, &target, &options, &progress).unwrap();
         assert_eq!(full.hashed_files, 2);
         assert!(full.missing[0].digest.is_some());
+        assert_eq!(progress.files.position(), 2);
+        assert_eq!(progress.bytes.length(), Some(140_000));
+        assert_eq!(progress.bytes.position(), 140_000);
     }
 }

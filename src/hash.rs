@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use digest::Digest;
+use indicatif::ProgressBar;
 
 use crate::cli::Algorithm;
 
@@ -19,26 +20,33 @@ enum Hasher {
     Sha256(sha2::Sha256),
 }
 
-pub fn hash_file(path: &Path, algorithm: Algorithm, limit: Option<u64>) -> Result<String> {
+pub fn hash_file(
+    path: &Path,
+    algorithm: Algorithm,
+    limit: Option<u64>,
+    progress: &ProgressBar,
+) -> Result<String> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let length = file.metadata()?.len().min(limit.unwrap_or(u64::MAX));
     hash_reader_sized(
         file.take(length),
         algorithm,
         length.min(BUFFER_BYTES as u64).max(1) as usize,
+        progress,
     )
     .with_context(|| format!("hashing {}", path.display()))
 }
 
 #[cfg(test)]
 fn hash_reader(mut reader: impl Read, algorithm: Algorithm) -> Result<String> {
-    hash_reader_sized(&mut reader, algorithm, BUFFER_BYTES)
+    hash_reader_sized(&mut reader, algorithm, BUFFER_BYTES, &ProgressBar::hidden())
 }
 
 fn hash_reader_sized(
     mut reader: impl Read,
     algorithm: Algorithm,
     buffer_size: usize,
+    progress: &ProgressBar,
 ) -> Result<String> {
     let mut hasher = match algorithm {
         Algorithm::Blake3 => Hasher::Blake3(Box::new(blake3::Hasher::new())),
@@ -65,6 +73,7 @@ fn hash_reader_sized(
             Hasher::Sha1(h) => Digest::update(h, bytes),
             Hasher::Sha256(h) => Digest::update(h, bytes),
         }
+        progress.inc(count as u64);
     }
     Ok(match hasher {
         Hasher::Blake3(h) => h.finalize().to_hex().to_string(),
@@ -109,5 +118,52 @@ mod tests {
         for (algorithm, expected) in cases {
             assert_eq!(hash_reader(&b"abc"[..], algorithm).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn hashing_advances_between_reads_and_honors_prefix_limit() {
+        struct ObservedReader<'a> {
+            remaining: usize,
+            processed: u64,
+            progress: &'a ProgressBar,
+        }
+        impl Read for ObservedReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert_eq!(self.progress.position(), self.processed);
+                let count = self.remaining.min(buffer.len());
+                buffer[..count].fill(b'a');
+                self.remaining -= count;
+                self.processed += count as u64;
+                Ok(count)
+            }
+        }
+        let progress = ProgressBar::hidden();
+        let count = BUFFER_BYTES * 2 + 7;
+        hash_reader_sized(
+            ObservedReader {
+                remaining: count,
+                processed: 0,
+                progress: &progress,
+            },
+            Algorithm::Blake3,
+            BUFFER_BYTES,
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(progress.position(), count as u64);
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("large");
+        std::fs::write(&path, vec![b'a'; count]).unwrap();
+        progress.set_position(0);
+        let prefix = hash_file(&path, Algorithm::Blake3, Some(PREFIX_BYTES), &progress).unwrap();
+        assert_eq!(progress.position(), PREFIX_BYTES);
+        assert_eq!(
+            prefix,
+            hash_reader(&vec![b'a'; PREFIX_BYTES as usize][..], Algorithm::Blake3).unwrap()
+        );
+        progress.set_position(0);
+        hash_file(&path, Algorithm::Blake3, None, &progress).unwrap();
+        assert_eq!(progress.position(), count as u64);
     }
 }

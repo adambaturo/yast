@@ -75,6 +75,35 @@ fn equal_trees_and_empty_trees_succeed() {
 }
 
 #[test]
+fn progress_never_leaks_into_reports_or_redirected_stderr() {
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    put(source.path(), "a", vec![b'a'; 1024 * 1024 + 7]);
+    for format in ["text", "json", "csv"] {
+        let mut outputs = Vec::new();
+        for quiet in [false, true] {
+            let mut command = yast();
+            command
+                .arg("sync")
+                .arg(source.path())
+                .arg(target.path())
+                .args(["--format", format, "--hash-all", "--verify"]);
+            if quiet {
+                command.arg("--quiet");
+            }
+            let output = command.assert().success().get_output().clone();
+            assert!(output.stderr.is_empty());
+            assert!(!output.stdout.contains(&b'\x1b'));
+            if format == "json" {
+                serde_json::from_slice::<Value>(&output.stdout).unwrap();
+            }
+            outputs.push(output.stdout);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+}
+
+#[test]
 fn dupes_and_filters() {
     let dir = TempDir::new().unwrap();
     put(dir.path(), "a", "abc");

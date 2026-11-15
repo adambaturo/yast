@@ -278,6 +278,39 @@ paths; quote them to prevent shell expansion. Use `--exclude 'cache'` to prune
 that directory and its descendants. Progress appears on stderr only when it is a
 terminal and `--quiet` is absent, keeping stdout suitable for pipelines.
 
+### Progress
+
+Scanning shows the directory role and the number of included files found so far,
+without an extra counting pass. The final total is unknown until scanning ends.
+Afterward, the display retains the source/target inventory totals and labels each
+phase's selected files or actions separately. Hashing candidates can be fewer
+than the inventory because size and prefix checks avoid unnecessary full reads.
+
+Hashing and copying update byte progress within each file, including GB-sized
+files. The display aggregates parallel workers rather than showing one bar per
+file. Prefix hashing counts up to 64 KiB per candidate; full hashing counts the
+entire selected files. Speed and ETA describe the labeled byte phase, not the
+whole command, and are estimates.
+
+Sync displays copied bytes separately from optional verification reads; copying,
+verification, and publication can overlap across workers. An action completes
+only after publication or a reported failure. Verification reads both the source
+and staged copy, so its byte total is twice the selected content size. Dry runs
+show planned action counts without claiming any data was copied or verified.
+
+Duplicate actions show batch action counts and byte progress for the current
+verification or cross-filesystem copy. Each verification pass counts reads from
+both files and starts a fresh byte budget. Safety checks can read the same content
+several times, even for a same-filesystem move. A cross-filesystem fallback is
+discovered only after attempting a rename, so there is no whole-move byte total
+or whole-command ETA. Failed or interrupted work is not filled to 100%.
+
+Renaming, flushing/publishing, deleting, and sending to OS trash have activity
+indicators, not byte percentages: those OS calls expose no measurable progress.
+Zero-byte work omits byte speed/ETA. Files remain streamed with bounded buffers;
+interactive copying uses buffered I/O to report successful writes, while hidden
+progress retains native file-to-file copy optimizations where available.
+
 ## Flatten naming
 
 1. Sanitize each relative path component and join with underscores:

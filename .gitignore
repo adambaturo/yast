@@ -25,3 +25,5 @@ rustc-ice-*.txt
 
 # Visual Studio Code settings and workspace files
 .vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json

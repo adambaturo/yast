@@ -4,12 +4,12 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use indicatif::ProgressBar;
 use serde::Serialize;
 
 use crate::cli::{DupesAction, DupesOptions, Layout};
 use crate::compare::Comparison;
 use crate::copy::{check_parents, destination, occupied, publish, stage_copy};
+use crate::progress::{CountingReader, Progress};
 use crate::scan::{ensure_unchanged, FileEntry};
 
 #[derive(Debug, Serialize)]
@@ -46,24 +46,33 @@ pub fn dedupe(
     comparison: &Comparison,
     options: &DupesOptions,
     target: Option<&Path>,
-    progress: &ProgressBar,
+    progress: &Progress,
 ) -> Result<DedupeReport> {
-    let planned = plan(files, comparison, options, target)?;
-    progress.set_message(if options.execute {
-        "Acting on duplicates"
-    } else {
-        "Planning duplicate actions"
-    });
-    progress.set_position(0);
-    progress.set_length(planned.len() as u64);
+    progress.phase(
+        "Planning duplicate destinations (actions)",
+        comparison
+            .source_duplicates
+            .iter()
+            .map(|group| group.paths.len() - 1)
+            .sum(),
+    );
+    let planned = plan(files, comparison, options, target, progress)?;
+    progress.phase(
+        if options.execute {
+            "Acting on duplicates (actions)"
+        } else {
+            "Planning duplicate actions"
+        },
+        planned.len(),
+    );
     let mut report = DedupeReport {
         dry_run: !options.execute,
         planned: planned.len(),
         ..DedupeReport::default()
     };
     for item in planned {
-        let action = act(root, item, options.execute, target);
-        progress.inc(1);
+        let action = act(root, item, options.execute, target, progress);
+        progress.completed();
         report.bytes_planned += action.size;
         match action.status {
             "done" => {
@@ -86,6 +95,7 @@ fn plan<'a>(
     comparison: &Comparison,
     options: &DupesOptions,
     target: Option<&Path>,
+    progress: &Progress,
 ) -> Result<Vec<PlannedAction<'a>>> {
     let lookup: HashMap<_, _> = files
         .iter()
@@ -141,6 +151,7 @@ fn plan<'a>(
                 file,
                 action,
             });
+            progress.completed();
         }
     }
     Ok(planned)
@@ -151,6 +162,7 @@ fn act(
     mut planned: PlannedAction<'_>,
     execute: bool,
     target: Option<&Path>,
+    progress: &Progress,
 ) -> DedupeAction {
     if planned.action.error.is_some() || !execute {
         return planned.action;
@@ -173,11 +185,19 @@ fn act(
                 );
                 fs::create_dir_all(parent)?;
                 check_parents(target, parent)?;
-                verify_pair(root, planned.file, planned.keeper)?;
+                verify_pair(root, planned.file, planned.keeper, progress)?;
+                progress.activity("Renaming duplicate (actions)");
                 match rename_noclobber(&planned.file.path, destination) {
                     Ok(()) => Ok(()),
                     Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-                        copy_then_remove(root, planned.file, planned.keeper, target, destination)
+                        copy_then_remove(
+                            root,
+                            planned.file,
+                            planned.keeper,
+                            target,
+                            destination,
+                            progress,
+                        )
                     }
                     Err(error) => Err(error).with_context(|| {
                         format!("moving without overwrite to {}", destination.display())
@@ -185,10 +205,12 @@ fn act(
                 }
             }
             action => {
-                verify_pair(root, planned.file, planned.keeper)?;
+                verify_pair(root, planned.file, planned.keeper, progress)?;
                 if action == "trash" {
+                    progress.activity("Sending duplicate to OS trash (actions)");
                     trash::delete(&planned.file.path).context("sending duplicate to OS trash")
                 } else {
+                    progress.activity("Deleting duplicate (actions)");
                     fs::remove_file(&planned.file.path).context("permanently deleting duplicate")
                 }
             }
@@ -199,7 +221,14 @@ fn act(
     planned.action
 }
 
-fn verify_pair(root: &Path, file: &FileEntry, keeper: &FileEntry) -> Result<()> {
+fn verify_pair(
+    root: &Path,
+    file: &FileEntry,
+    keeper: &FileEntry,
+    progress: &Progress,
+) -> Result<()> {
+    progress.activity("Verifying duplicate and keeper (actions)");
+    progress.verification_phase(file.size.saturating_mul(2));
     for entry in [file, keeper] {
         check_parents(root, entry.path.parent().context("file without parent")?)?;
         let metadata = fs::symlink_metadata(&entry.path)?;
@@ -211,7 +240,7 @@ fn verify_pair(root: &Path, file: &FileEntry, keeper: &FileEntry) -> Result<()> 
         ensure_unchanged(entry)?;
     }
     anyhow::ensure!(
-        equal_bytes(&file.path, &keeper.path)?,
+        equal_bytes(&file.path, &keeper.path, progress)?,
         "duplicate no longer matches keeper: {}",
         file.path.display()
     );
@@ -220,9 +249,18 @@ fn verify_pair(root: &Path, file: &FileEntry, keeper: &FileEntry) -> Result<()> 
     Ok(())
 }
 
-fn equal_bytes(left: &Path, right: &Path) -> Result<bool> {
-    let mut left = BufReader::new(fs::File::open(left)?);
-    let mut right = BufReader::new(fs::File::open(right)?);
+fn equal_bytes(left: &Path, right: &Path, progress: &Progress) -> Result<bool> {
+    let reader = |path| -> io::Result<_> {
+        Ok(BufReader::with_capacity(
+            1024 * 1024,
+            CountingReader {
+                inner: fs::File::open(path)?,
+                progress: &progress.verification,
+            },
+        ))
+    };
+    let mut left = reader(left)?;
+    let mut right = reader(right)?;
     loop {
         let a = left.fill_buf()?;
         let b = right.fill_buf()?;
@@ -244,29 +282,36 @@ fn copy_then_remove(
     keeper: &FileEntry,
     target: &Path,
     destination: &Path,
+    progress: &Progress,
 ) -> Result<()> {
-    let temporary = stage_copy(file, target, destination)?;
+    progress.activity("Copying duplicate across filesystems (actions)");
+    progress.byte_phase("Copied bytes", file.size);
+    let temporary = stage_copy(file, target, destination, progress)?;
     #[cfg(unix)]
     temporary
         .as_file()
         .set_permissions(fs::metadata(&file.path)?.permissions())?;
+    progress.activity("Verifying staged move (actions)");
+    progress.verification_phase(file.size.saturating_mul(2));
     anyhow::ensure!(
-        equal_bytes(&file.path, temporary.path())?,
+        equal_bytes(&file.path, temporary.path(), progress)?,
         "staged move verification failed"
     );
-    verify_pair(root, file, keeper)?;
+    verify_pair(root, file, keeper, progress)?;
     check_parents(
         target,
         destination.parent().context("destination without parent")?,
     )?;
+    progress.activity("Publishing duplicate / flushing (actions)");
     publish(temporary, destination)?;
     // A failed recheck/removal leaves the published copy and source intact, and is reported.
-    verify_pair(root, file, keeper).with_context(|| {
+    verify_pair(root, file, keeper, progress).with_context(|| {
         format!(
             "destination published at {}; source retained",
             destination.display()
         )
     })?;
+    progress.activity("Removing relocated source (actions)");
     fs::remove_file(&file.path).with_context(|| {
         format!(
             "destination published at {}; removing source",
@@ -365,9 +410,15 @@ mod tests {
     fn changed_duplicate_or_keeper_is_failed_and_untouched() {
         for index in [0, 1] {
             let (root, files, comparison, options) = fixture();
-            let planned = plan(&files, &comparison, &options, None).unwrap();
+            let planned = plan(&files, &comparison, &options, None, &Progress::hidden()).unwrap();
             fs::write(&files[index].path, b"changed content").unwrap();
-            let action = act(root.path(), planned.into_iter().next().unwrap(), true, None);
+            let action = act(
+                root.path(),
+                planned.into_iter().next().unwrap(),
+                true,
+                None,
+                &Progress::hidden(),
+            );
             assert_eq!(action.status, "failed");
             assert!(action.error.unwrap().contains("file changed"));
             assert!(files.iter().all(|file| file.path.is_file()));
@@ -378,7 +429,7 @@ mod tests {
     #[test]
     fn same_metadata_mismatch_is_not_deleted() {
         let (root, files, comparison, options) = fixture();
-        let planned = plan(&files, &comparison, &options, None).unwrap();
+        let planned = plan(&files, &comparison, &options, None, &Progress::hidden()).unwrap();
         // Retain both size and mtime so only the byte comparison can detect the change.
         fs::write(&files[1].path, b"changed").unwrap();
         filetime::set_file_mtime(
@@ -386,7 +437,13 @@ mod tests {
             filetime::FileTime::from_system_time(files[1].modified),
         )
         .unwrap();
-        let action = act(root.path(), planned.into_iter().next().unwrap(), true, None);
+        let action = act(
+            root.path(),
+            planned.into_iter().next().unwrap(),
+            true,
+            None,
+            &Progress::hidden(),
+        );
         assert_eq!(action.status, "failed");
         assert!(action.error.unwrap().contains("no longer matches"));
         assert_eq!(fs::read(&files[1].path).unwrap(), b"changed");
@@ -397,18 +454,38 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let left = root.path().join("left");
         let right = root.path().join("right");
-        let mut bytes = vec![b'a'; 70_000];
+        let mut bytes = vec![b'a'; 2 * 1024 * 1024 + 7];
         fs::write(&left, &bytes).unwrap();
         fs::write(&right, &bytes).unwrap();
-        assert!(equal_bytes(&left, &right).unwrap());
-        bytes[69_999] = b'b';
+        let progress = Progress::hidden();
+        progress.verification_phase(2 * bytes.len() as u64);
+        assert!(equal_bytes(&left, &right, &progress).unwrap());
+        assert_eq!(progress.verification.position(), 2 * bytes.len() as u64);
+        let last = bytes.len() - 1;
+        bytes[last] = b'b';
         fs::write(&right, &bytes).unwrap();
-        assert!(!equal_bytes(&left, &right).unwrap());
-        fs::write(&right, &bytes[..69_999]).unwrap();
-        assert!(!equal_bytes(&left, &right).unwrap());
+        progress.verification_phase(2 * bytes.len() as u64);
+        assert!(!equal_bytes(&left, &right, &progress).unwrap());
+        assert_eq!(progress.verification.position(), 2 * bytes.len() as u64);
+        fs::write(&right, &bytes[..last]).unwrap();
+        assert!(!equal_bytes(&left, &right, &progress).unwrap());
         fs::write(&left, []).unwrap();
         fs::write(&right, []).unwrap();
-        assert!(equal_bytes(&left, &right).unwrap());
+        progress.verification_phase(0);
+        assert!(equal_bytes(&left, &right, &progress).unwrap());
+        assert_eq!(progress.verification.position(), 0);
+    }
+
+    #[test]
+    fn each_duplicate_safety_recheck_gets_its_own_byte_budget() {
+        let (root, files, _, _) = fixture();
+        let progress = Progress::hidden();
+        for _ in 0..2 {
+            verify_pair(root.path(), &files[1], &files[0], &progress).unwrap();
+            assert_eq!(progress.verification.length(), Some(14));
+            assert_eq!(progress.verification.position(), 14);
+            assert_eq!(progress.bytes.position(), 0);
+        }
     }
 
     #[test]
@@ -432,7 +509,8 @@ mod tests {
             &files[1],
             &files[0],
             target.path(),
-            &destination
+            &destination,
+            &Progress::hidden()
         )
         .is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"existing");
@@ -445,6 +523,7 @@ mod tests {
             &files[0],
             target.path(),
             &destination,
+            &Progress::hidden(),
         )
         .unwrap();
         assert!(!files[1].path.exists());
@@ -470,6 +549,7 @@ mod tests {
             &files[0],
             target.path(),
             &destination,
+            &Progress::hidden(),
         )
         .unwrap();
         assert_eq!(

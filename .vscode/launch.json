@@ -1,0 +1,76 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "yast: compare",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--locked", "--bin", "yast"],
+                "filter": {
+                    "name": "yast",
+                    "kind": "bin"
+                }
+            },
+            "args": ["compare", "${input:sourceDirectory}", "${input:targetDirectory}"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
+        },
+        {
+            "name": "yast: dupes (report only)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--locked", "--bin", "yast"],
+                "filter": {
+                    "name": "yast",
+                    "kind": "bin"
+                }
+            },
+            "args": ["dupes", "${input:sourceDirectory}"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
+        },
+        {
+            "name": "yast: sync (dry run)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--locked", "--bin", "yast"],
+                "filter": {
+                    "name": "yast",
+                    "kind": "bin"
+                }
+            },
+            "args": ["sync", "${input:sourceDirectory}", "${input:syncTargetDirectory}"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "sourceDirectory",
+            "type": "promptString",
+            "description": "Source directory (also used for duplicate reporting; relative to workspace or absolute)",
+            "default": "src"
+        },
+        {
+            "id": "targetDirectory",
+            "type": "promptString",
+            "description": "Target directory (relative to workspace or absolute)",
+            "default": "tests"
+        },
+        {
+            "id": "syncTargetDirectory",
+            "type": "promptString",
+            "description": "Sync target directory (dry run; may be nonexistent; relative to workspace or absolute)",
+            "default": "yast-debug-output"
+        }
+    ]
+}
