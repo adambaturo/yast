@@ -29,6 +29,11 @@ pub fn scan(
         globs.add(Glob::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?);
     }
     let globs = globs.build()?;
+    let mut includes = GlobSetBuilder::new();
+    for pattern in &options.include {
+        includes.add(Glob::new(pattern).with_context(|| format!("invalid glob: {pattern}"))?);
+    }
+    let includes = includes.build()?;
     let files = Mutex::new(Vec::new());
     let errors = Mutex::new(Vec::new());
     let mut walker = WalkBuilder::new(root);
@@ -60,13 +65,17 @@ pub fn scan(
                 if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                     return Ok(());
                 }
+                let relative = entry.path().strip_prefix(root)?;
+                if !options.include.is_empty() && !includes.is_match(relative) {
+                    return Ok(());
+                }
                 let metadata = entry.metadata()?;
                 if metadata.len() < options.min_size {
                     return Ok(());
                 }
                 files.lock().unwrap().push(FileEntry {
                     path: entry.path().to_path_buf(),
-                    relative: entry.path().strip_prefix(root)?.to_path_buf(),
+                    relative: relative.to_path_buf(),
                     size: metadata.len(),
                     modified: metadata.modified()?,
                 });
@@ -122,6 +131,55 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn includes_match_nested_files_as_a_union_but_excludes_win() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("nested/deeper")).unwrap();
+        std::fs::create_dir_all(root.path().join("cache")).unwrap();
+        for path in [
+            "a.jpg",
+            "nested/deeper/b.png",
+            "nested/deeper/c.txt",
+            "skip.jpg",
+            "cache/d.png",
+        ] {
+            std::fs::write(root.path().join(path), b"content").unwrap();
+        }
+        let options = Cli::parse_from([
+            "yast",
+            "dupes",
+            ".",
+            "--include",
+            "*.jpg",
+            "--include",
+            "*.png",
+            "--exclude",
+            "skip.jpg",
+            "--exclude",
+            "cache",
+        ])
+        .common;
+        let progress = Progress::hidden();
+        let files = scan(root.path(), &options, 2, &progress).unwrap();
+        let paths: Vec<_> = files.iter().map(|file| file.relative.clone()).collect();
+        assert_eq!(
+            paths,
+            [PathBuf::from("a.jpg"), PathBuf::from("nested/deeper/b.png")]
+        );
+        assert_eq!(progress.files.position(), 2);
+
+        for (pattern, expected) in [("nested", 0), ("nested/**", 2), ("absent/**", 0)] {
+            let options = Cli::parse_from(["yast", "dupes", ".", "--include", pattern]).common;
+            assert_eq!(
+                scan(root.path(), &options, 2, &Progress::hidden())
+                    .unwrap()
+                    .len(),
+                expected,
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn discovery_counts_only_included_files_and_restarts_for_target() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("included"), b"content").unwrap();
@@ -132,6 +190,8 @@ mod tests {
             "yast",
             "dupes",
             ".",
+            "--include",
+            "*",
             "--exclude",
             "*.tmp",
             "--skip-hidden",

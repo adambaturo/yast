@@ -102,6 +102,7 @@ path. Missing/extra counts are content groups, not physical file counts.
 
 ```console
 yast compare ./camera ./archive --exclude '*.tmp' --exclude 'cache/**'
+yast compare ./camera ./archive --include '*.jpg' --include '*.png' --exclude 'cache'
 yast compare ./camera ./archive --format json --output comparison.json
 yast compare ./camera ./archive --format csv > comparison.csv
 yast compare ./camera ./archive --hash sha256 --threads 8 --min-size 1MiB
@@ -261,6 +262,7 @@ These options can appear before or after a subcommand:
 | `--threads N` | logical CPU count | Positive worker count for walking, hashing, copying |
 | `--format text\|json\|csv` | `text` | Report encoding |
 | `--output FILE` | stdout | Create a new report file; existing files are not overwritten |
+| `--include GLOB` | all (`*`) | Include only matching relative file paths; repeatable |
 | `--exclude GLOB` | none | Exclude matching relative paths; repeatable |
 | `--skip-hidden` | off | Skip dotfiles/directories and Windows hidden entries |
 | `--follow-symlinks` | off | Follow file/directory links, reporting traversal errors/loops |
@@ -271,12 +273,20 @@ These options can appear before or after a subcommand:
 | `-h`, `--help` | | Command help (long form includes explanations) |
 | `-V`, `--version` | | Version information |
 
-Filters apply to both sides, so excluded/too-small content is not considered
-present in target. Ignore files such as `.gitignore` are not consulted; hidden
-entries (including `.git`) are included unless excluded. Patterns match relative
-paths; quote them to prevent shell expansion. Use `--exclude 'cache'` to prune
-that directory and its descendants. Progress appears on stderr only when it is a
-terminal and `--quiet` is absent, keeping stdout suitable for pipelines.
+Filters apply to both sides, so nonincluded/excluded/too-small content is not
+considered present in target. Without `--include`, all files are eligible; when
+provided, a file must match at least one include pattern. Exclude always takes
+precedence, regardless of argument order, and the other filters still apply.
+Place repeated occurrences of each filter option together before or after the
+subcommand, rather than splitting them across it.
+Ignore files such as `.gitignore` are not consulted; hidden entries (including
+`.git`) are eligible unless filtered out. Include and exclude use the same glob
+rules and match relative paths; quote patterns to prevent shell expansion.
+Includes match files only: use `--include 'photos/**'` to select files under that
+directory, not `--include 'photos'`. Nonmatching directories are still traversed
+to find matching files. Use `--exclude 'cache'` to prune that directory and its
+descendants. Progress appears on stderr only when it is a terminal and `--quiet`
+is absent, keeping stdout suitable for pipelines.
 
 ### Progress
 

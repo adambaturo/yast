@@ -135,6 +135,140 @@ fn dupes_and_filters() {
 }
 
 #[test]
+fn include_defaults_to_all_and_no_matches_produce_an_empty_inventory() {
+    let dir = TempDir::new().unwrap();
+    for path in ["a", ".hidden", "nested/b", "ignored.tmp"] {
+        put(dir.path(), path, "same");
+    }
+    let default = report(yast().arg("dupes").arg(dir.path()), 1);
+    let explicit = report(
+        yast().arg("dupes").arg(dir.path()).args(["--include", "*"]),
+        1,
+    );
+    assert_eq!(default, explicit);
+    assert_eq!(default["comparison"]["source_files"], 4);
+    let empty = report(
+        yast()
+            .arg("dupes")
+            .arg(dir.path())
+            .args(["--include", "*.absent"]),
+        0,
+    );
+    assert_eq!(empty["comparison"]["source_files"], 0);
+    assert!(empty["comparison"]["source_duplicates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn compare_includes_are_global_repeatable_and_filter_both_roots() {
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    put(source.path(), "a.jpg", "common");
+    put(source.path(), "nested/b.png", "missing");
+    put(source.path(), "ignored.txt", "ignored source");
+    put(source.path(), "skip.jpg", "excluded source");
+    put(target.path(), "renamed.jpg", "common");
+    put(target.path(), "filtered.txt", "missing");
+    put(target.path(), "skip.jpg", "excluded target");
+    put(target.path(), "extra.txt", "ignored target");
+    for filters_before in [false, true] {
+        for exclude_first in [false, true] {
+            let mut command = yast();
+            let mut filters = vec!["--include", "*.jpg", "--include", "*.png"];
+            if exclude_first {
+                filters.splice(0..0, ["--exclude", "skip.jpg"]);
+            } else {
+                filters.extend(["--exclude", "skip.jpg"]);
+            }
+            if filters_before {
+                command.args(&filters);
+            }
+            command.arg("compare").arg(source.path()).arg(target.path());
+            if !filters_before {
+                command.args(&filters);
+            }
+            let result = report(&mut command, 1);
+            assert_eq!(result["comparison"]["source_files"], 2);
+            assert_eq!(result["comparison"]["target_files"], 1);
+            assert_eq!(result["comparison"]["common"].as_array().unwrap().len(), 1);
+            assert_eq!(result["comparison"]["missing"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                Path::new(
+                    result["comparison"]["missing"][0]["paths"][0]
+                        .as_str()
+                        .unwrap()
+                ),
+                Path::new("nested/b.png")
+            );
+            assert!(result["comparison"]["extra"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn sync_includes_copy_only_selected_nonexcluded_content() {
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    put(source.path(), "a.txt", "first");
+    put(source.path(), "nested/b.txt", "second");
+    put(source.path(), "skip.txt", "excluded");
+    put(source.path(), "ignored.bin", "unselected");
+    put(target.path(), "existing.bin", "first");
+    let result = report(
+        yast()
+            .arg("sync")
+            .arg(source.path())
+            .arg(target.path())
+            .args(["--include", "*.txt", "--exclude", "skip.txt", "--execute"]),
+        0,
+    );
+    assert_eq!(result["comparison"]["source_files"], 2);
+    assert_eq!(result["comparison"]["target_files"], 0);
+    assert_eq!(result["sync"]["copied"], 2);
+    assert_eq!(fs::read(target.path().join("a.txt")).unwrap(), b"first");
+    assert_eq!(
+        fs::read(target.path().join("nested/b.txt")).unwrap(),
+        b"second"
+    );
+    assert_eq!(
+        fs::read(target.path().join("existing.bin")).unwrap(),
+        b"first"
+    );
+    assert!(!target.path().join("skip.txt").exists());
+    assert!(!target.path().join("ignored.bin").exists());
+}
+
+#[test]
+fn dupes_includes_leave_unselected_and_excluded_duplicates_untouched() {
+    let dir = TempDir::new().unwrap();
+    for path in ["0.bin", "a.txt", "nested/z.txt", "skip.txt"] {
+        put(dir.path(), path, "same");
+    }
+    let result = report(
+        yast().arg("dupes").arg(dir.path()).args([
+            "--include",
+            "*.txt",
+            "--exclude",
+            "skip.txt",
+            "--action",
+            "delete",
+            "--permanent",
+            "--execute",
+        ]),
+        0,
+    );
+    assert_eq!(result["comparison"]["source_files"], 2);
+    assert_eq!(result["dedupe"]["done"], 1);
+    assert_eq!(result["dedupe"]["actions"][0]["keeper"], "a.txt");
+    for path in ["0.bin", "a.txt", "skip.txt"] {
+        assert_eq!(fs::read(dir.path().join(path)).unwrap(), b"same");
+    }
+    assert!(!dir.path().join("nested/z.txt").exists());
+}
+
+#[test]
 fn dupes_report_default_output_is_unchanged() {
     let dir = TempDir::new().unwrap();
     put(dir.path(), "a", "same");
@@ -657,6 +791,18 @@ fn all_hash_algorithms_and_invalid_inputs() {
         .args(["--exclude", "["])
         .assert()
         .code(2);
+    let output = yast()
+        .arg("dupes")
+        .arg(source.path())
+        .args(["--include", "["])
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("invalid glob: ["));
     yast()
         .arg("dupes")
         .arg(source.path())
