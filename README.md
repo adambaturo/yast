@@ -65,19 +65,6 @@ cargo install --git https://github.com/adambaturo/yast --locked
 yast --help
 ```
 
-From a checkout, build without installing with `cargo build --release --locked`, then run
-`target/release/yast` (`target\release\yast.exe` on Windows).
-
-## Versioning and releases
-
-`Cargo.toml` is the version source of truth; releases use SemVer tags `vX.Y.Z`.
-Until stable, breaking changes bump the `0.x` minor version and features/fixes
-bump the patch. Squash-merged PR titles follow Conventional Commits.
-release-plz prepares version/changelog PRs and publishes GitHub Releases (not
-crates.io); CI then attaches six platform archives, checksums, and provenance.
-See [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
-[RELEASING.md](RELEASING.md).
-
 ## Quick start
 
 ```console
@@ -169,7 +156,7 @@ yast dupes ./downloads --action move --to ./duplicates --layout flatten --max-na
 | `--max-name-len N` | `64` | Flattened filename limit in Unicode characters; minimum 16 |
 
 Deletion defaults to Windows Recycle Bin, macOS Trash, or Linux freedesktop
-trash through the `trash` crate. A trash failure is reported as a failed action;
+trash. A trash failure is reported as a failed action;
 there is **no fallback to permanent deletion**.
 
 Move accepts a nonexistent destination and resolves existing symlink components
@@ -177,8 +164,8 @@ before applying `..` components and
 checking overlap. `keep` reports existing destination paths as failed actions.
 `flatten` reuses sync naming, adding a deterministic BLAKE3 suffix for existing
 or planned collisions. Destination parents must be plain directories, not links.
-Moves use the platform's atomic no-replace rename on the same filesystem
-(`fs::rename` can overwrite, so it is not used directly). On a cross-device error, a temporary copy is
+Moves use the platform's atomic no-replace rename on the same filesystem.
+On a cross-device error, a temporary copy is
 assigned the source mtime and Unix permissions, compared byte-for-byte, and published without clobbering
 before removing the source. A failure after publishing retains the destination
 copy and reports the error; the source is not removed if its safety recheck fails.
@@ -317,9 +304,7 @@ or whole-command ETA. Failed or interrupted work is not filled to 100%.
 
 Renaming, flushing/publishing, deleting, and sending to OS trash have activity
 indicators, not byte percentages: those OS calls expose no measurable progress.
-Zero-byte work omits byte speed/ETA. Files remain streamed with bounded buffers;
-interactive copying uses buffered I/O to report successful writes, while hidden
-progress retains native file-to-file copy optimizations where available.
+Zero-byte work omits byte speed/ETA.
 
 ## Flatten naming
 
@@ -375,17 +360,7 @@ Duplicate-action CSV appends `keeper,action` and uses the same summary-row
 convention. Operational errors go to stderr and return 2; per-file failures are
 also included in the sync or duplicate-action report.
 
-## Performance and correctness
-
-The parallel walker collects only path, size and modification time. Size counts
-across both trees immediately eliminate unique sizes. Same-size candidates are
-hashed over the first 64 KiB, then only matching prefixes require full streaming
-hashes. Small files need just one read. Full reads use chunks up to 1 MiB;
-per-file buffers shrink for small files. Rayon bounds hashing/copy concurrency.
-Buffered streaming avoids mmap hazards when files change during scanning.
-Memory is proportional to file/path counts and worker buffers, not file contents.
-The current implementation holds the inventory and report in memory rather than
-using an on-disk database.
+## Performance and data safety
 
 BLAKE3 is the recommended balance of speed and collision resistance. XXH3 uses a
 128-bit digest. CRC32/XXH3 are non-cryptographic, and MD5/SHA-1 are legacy choices:
@@ -410,15 +385,9 @@ detect edits preserving both values; duplicate actions additionally compare byte
 | `1` | Compare found differences/duplicates, or report-only dupes found duplicates |
 | `2` | Invalid arguments, traversal/hash/report error, planning error, or any sync/duplicate-action failure |
 
-## Development
+## Contributing
 
-```console
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --release
-```
-
-CI runs formatting, Clippy and tests on Ubuntu, Windows and macOS.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, checks, implementation
+notes, and release guidance. Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 Licensed under the [MIT license](LICENSE).
